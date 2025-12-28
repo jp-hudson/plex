@@ -9,9 +9,8 @@ import urllib.request
 import random
 import time
 from datetime import datetime, timedelta
-from collections import defaultdict, Counter
+from collections import defaultdict
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 # ================= CONFIG =================
 
@@ -22,7 +21,6 @@ MEDIA_DIRS = {
 }
 
 STATE_FILE = os.path.expanduser("~/.media_state.json")
-UNSUB_FILE = os.path.expanduser("~/.media_unsubscribed.json")
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
@@ -32,15 +30,25 @@ EMAIL_FROM = "Hudson Plex Media <hudson.plex.media@gmail.com>"
 EMAIL_TO = [
     "jhudson2083@gmail.com",
     "torpaulson@gmail.com",
+    "leahgannon14@gmail.com",
+    "garrettw731@gmail.com",
+    "bentleyrocket52000@gmail.com",
+    "hahuddy@gmail.com",
+    "hgannon40@gmail.com",
+    "rustyspydell@yahoo.com",
 ]
+
+# ---- Scheduling ----
+SEND_WEEKDAY = 4        # Friday (Mon=0)
+SEND_HOUR = 13          # 1 PM
+WEEK_SECONDS = 7 * 24 * 60 * 60
+TEST_MODE = False       # 🔧 set True to force send for testing
 
 EMERGENCY_QUOTES = [
     "“Progress, not perfection.”",
     "“One step at a time.”",
     "“Make it work, then make it right.”",
 ]
-
-WEEK_SECONDS = 7 * 24 * 60 * 60
 
 # =========================================
 # ---------- Keychain helpers ----------
@@ -65,24 +73,24 @@ def get_omdb_key():
     return r.stdout.strip()
 
 
-# ---------- Quote helper ----------
+# ---------- Quotes ----------
 
 def fetch_weekly_quote():
-    for url, fmt in [
+    sources = [
         ("https://zenquotes.io/api/random", lambda d: f"“{d[0]['q']}” — {d[0]['a']}"),
         ("https://api.quotable.io/random", lambda d: f"“{d['content']}” — {d['author']}"),
         ("https://quotes-db.vercel.app/api/random", lambda d: f"“{d['quote']}” — {d['author']}"),
-    ]:
+    ]
+    for url, fmt in sources:
         try:
             with urllib.request.urlopen(url, timeout=5) as r:
                 return fmt(json.load(r))
         except Exception:
             pass
-
     return random.choice(EMERGENCY_QUOTES)
 
 
-# ---------- IMDb helpers ----------
+# ---------- IMDb / OMDb ----------
 
 def imdb_search_link(title):
     return f"https://www.imdb.com/find/?q={urllib.parse.quote(title)}&s=tt"
@@ -92,7 +100,7 @@ def base_show_name(title):
     return title.split("–", 1)[0].strip()
 
 
-def imdb_title_url(title, media_type):
+def omdb_lookup(title, media_type):
     try:
         api_key = get_omdb_key()
         if media_type in ("TV", "Anime"):
@@ -108,19 +116,33 @@ def imdb_title_url(title, media_type):
             data = json.load(r)
 
         if data.get("Response") == "True":
-            return f"https://www.imdb.com/title/{data['imdbID']}/"
-
+            return data
     except Exception:
         pass
+    return None
 
+
+def imdb_title_url(title, media_type):
+    data = omdb_lookup(title, media_type)
+    if data and "imdbID" in data:
+        return f"https://www.imdb.com/title/{data['imdbID']}/"
     return imdb_search_link(title)
 
 
-# ---------- Media scanning ----------
+def rotten_tomatoes_score(title):
+    data = omdb_lookup(title, "Movies")
+    if not data:
+        return None
+    for r in data.get("Ratings", []):
+        if r.get("Source") == "Rotten Tomatoes":
+            return r["Value"]
+    return None
+
+
+# ---------- Media scan ----------
 
 def scan_media():
     items = []
-
     for media_type, base in MEDIA_DIRS.items():
         if not os.path.isdir(base):
             continue
@@ -143,7 +165,6 @@ def scan_media():
                             "path": p,
                             "type": media_type,
                         })
-
     return items
 
 
@@ -151,7 +172,7 @@ def scan_media():
 
 def load_state():
     if not os.path.exists(STATE_FILE):
-        print("🆕 No state file found — initializing baseline")
+        print("🆕 Initializing state")
         return {"items": [], "pending": [], "last_email_ts": None}
 
     with open(STATE_FILE) as f:
@@ -172,9 +193,6 @@ def save_state(state):
 # ---------- Email ----------
 
 def send_email(pending):
-    if not pending:
-        return
-
     grouped = defaultdict(list)
     for i in pending:
         grouped[i["type"]].append(i)
@@ -185,27 +203,53 @@ def send_email(pending):
     end = datetime.now()
     start = end - timedelta(days=7)
 
-    names = [base_show_name(i["name"]) for i in pending]
-    popular = Counter(names).most_common(1)
-    popular_line = f"🔥 Popular this week: {popular[0][0]}" if popular else None
+    # 🎲 Surprise movie pick
+    movies = grouped.get("Movies", [])
+    surprise = random.choice(movies) if movies else None
 
     text = [
-        "Good evening John Plex user!\n",
-        f"New media added ({start:%b %d} – {end:%b %d})\n",
-        "Summary: " + ", ".join(f"{v} {k}" for k, v in counts.items()) + "\n",
+        "Good evening John Plex user!",
+        "",
+        "Here’s your weekly John Plex Media digest 🎬",
+        "",
+        f"New media added ({start:%b %d} – {end:%b %d})",
+        "Summary: " + ", ".join(f"{v} {k}" for k, v in counts.items()),
+        "",
     ]
 
-    if popular_line:
-        text.append(popular_line + "\n")
+    if surprise:
+        rt = rotten_tomatoes_score(surprise["name"])
+        text.extend([
+            "🎲 Surprise movie pick this week:",
+            f"{surprise['name']}" + (f" ⭐ {rt} RT" if rt else ""),
+            f"IMDb: {imdb_title_url(surprise['name'], 'Movies')}",
+            "",
+        ])
 
     for t in ("Movies", "TV", "Anime"):
         if t in grouped:
             text.append(f"{t}:")
             for i in grouped[t]:
-                text.append(f"- {i['name']}")
+                line = f"- {i['name']}"
+                if t == "Movies":
+                    rt = rotten_tomatoes_score(i["name"])
+                    if rt:
+                        line += f" ⭐ {rt} RT"
+                text.append(line)
+                text.append(f"  IMDb: {imdb_title_url(i['name'], i['type'])}")
             text.append("")
 
-    text.extend(["— — —", quote])
+    text.extend([
+        "— — —",
+        "Quote of the week:",
+        quote,
+        "",
+        "To unsubscribe, reply:",
+        "PLEASE REMOVE",
+        "",
+        "Enjoy the shows 🍿",
+        "— Hudson Plex Media",
+    ])
 
     msg = MIMEText("\n".join(text))
     msg["Subject"] = "🎬 John Plex Weekly Digest"
@@ -227,13 +271,13 @@ def main():
     state = load_state()
     current = scan_media()
 
-    print(f"🔍 Scan complete: {len(current)} total items found")
+    print(f"🔍 Scan complete: {len(current)} items found")
 
-    # ---- Baseline guard ----
+    # Baseline guard
     if not state["items"] and not state["pending"] and state["last_email_ts"] is None:
         state["items"] = current
         save_state(state)
-        print("✅ Baseline established (no pending, no email)")
+        print("✅ Baseline established")
         return
 
     seen = {i["path"] for i in state["items"]}
@@ -245,24 +289,28 @@ def main():
             state["pending"].append(i)
             added += 1
 
-    if added:
-        print(f"➕ Added {added} new items to pending")
-    else:
-        print("➖ No new items detected")
+    print(f"➕ {added} new items added to pending" if added else "➖ No new items")
 
     now = datetime.now()
-    friday = now.weekday() == 4 and now.hour >= 13
-    elapsed = (
+    is_send_day = now.weekday() == SEND_WEEKDAY
+    is_after_hour = now.hour >= SEND_HOUR
+    week_elapsed = (
         state["last_email_ts"] is None or
         time.time() - state["last_email_ts"] >= WEEK_SECONDS
     )
 
-    if state["pending"] and friday and elapsed:
+    should_send = (
+        state["pending"] and
+        (TEST_MODE or (is_send_day and is_after_hour and week_elapsed))
+    )
+
+    if should_send:
         send_email(state["pending"])
         state["pending"] = []
         state["last_email_ts"] = time.time()
+        print("✅ Weekly email sent")
     else:
-        print("⏳ Accumulating items (email not sent)")
+        print("⏳ Accumulating items")
 
     state["items"] = current
     save_state(state)
