@@ -44,7 +44,8 @@ LOG_FILE="$LOG_DIR/plex_ingest.log"
 mkdir -p "$LOG_DIR"
 
 # Timestamp every line, log to file + console
-exec > >(awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -a "$LOG_FILE") 2>&1
+exec > >(gawk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -a "$LOG_FILE") 2>&1
+
 
 
 ############################################################
