@@ -1,19 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-############################
-# CONFIG
-############################
+############################################################
+# ======================= CONFIG ===========================
+# All user-adjustable knobs live here
+############################################################
 
-INPUT_DIR="${1:-/Users/jhudson/Downloads/}"
-TMP_PREFIX=".unzip_"
+# Where you drop new downloads (or pass as arg)
+INPUT_DIR="${1:-/Users/jhudson/Downloads/thunder3}"
 
-PY_RENAMER="/Users/jhudson/bin/moviev1.py"   # <-- adjust path
-PLEX_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Staging directory (created inside INPUT_DIR)
+RAW_DIR_NAME="handbrake_raw"
 
-############################
-#  Logging
-############################
+# Plex library root
+PLEX_ROOT="/Volumes/Media"
+
+# Plex libraries
+MOVIES_DIR="$PLEX_ROOT/Movies"
+TV_DIR="$PLEX_ROOT/TV"
+ANIME_DIR="$PLEX_ROOT/Anime"
+
+# HandBrake presets
+PRESET_1080P="HQ 1080p30 Surround"
+PRESET_4K="HQ 2160p60 4K HEVC Surround"
+
+# Width threshold to switch to 4K preset
+FOUR_K_MIN_WIDTH=3000
+
+# Keep staging directory after completion? (1=yes, 0=no)
+KEEP_RAW=0
+
+# Anime detection keywords (simple heuristic)
+ANIME_SHOW_REGEX="Naruto|Bleach|One Piece|Attack on Titan"
+ANIME_MOVIE_REGEX="Ghibli|Spirited Away|Your Name|Suzume"
+
+############################################################
+# ======================== LOGGING =========================
+############################################################
 
 LOG_DIR="$INPUT_DIR/logs"
 LOG_FILE="$LOG_DIR/plex_ingest.log"
@@ -23,88 +46,204 @@ mkdir -p "$LOG_DIR"
 # Timestamp every line, log to file + console
 exec > >(awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -a "$LOG_FILE") 2>&1
 
-############################
-# PRE-FLIGHT CHECKS
-############################
 
-command -v unzip >/dev/null || { echo "unzip not found"; exit 1; }
-command -v ffprobe >/dev/null || { echo "ffprobe not found"; exit 1; }
-command -v HandBrakeCLI >/dev/null || { echo "HandBrakeCLI not found"; exit 1; }
-command -v python3 >/dev/null || { echo "python3 not found"; exit 1; }
+############################################################
+# ==================== PRE-FLIGHT ==========================
+############################################################
 
-############################
-# STEP 1: UNZIP ANY ZIP FILES
-############################
+for cmd in unzip ffprobe HandBrakeCLI sed; do
+  command -v "$cmd" >/dev/null || {
+    echo "Missing dependency: $cmd"
+    exit 1
+  }
+done
 
-for ZIP in "$INPUT_DIR"/*.zip; do
+RAW_DIR="$INPUT_DIR/$RAW_DIR_NAME"
+
+############################################################
+# ====================== HELPERS ===========================
+############################################################
+
+detect_resolution() {
+  ffprobe -v error \
+    -select_streams v:0 \
+    -show_entries stream=width \
+    -of csv=p=0 "$1"
+}
+
+sanitize_name() {
+  echo "$1" | sed \
+    -e 's/\./ /g' \
+    -e 's/_/ /g' \
+    -e 's/  */ /g' \
+    -e 's/^ *//;s/ *$//'
+}
+
+# === INLINE moviev1.py LOGIC ===
+clean_mkv_name() {
+  local file="$1"
+  local dir base ext new
+
+  dir="$(dirname "$file")"
+  base="$(basename "$file")"
+  ext="${base##*.}"
+  base="${base%.*}"
+
+  [[ "$ext" != "mkv" ]] && return
+
+  new="$base"
+
+  # Strip quality / source junk
+  new="$(echo "$new" | sed -E 's/[[:space:]\(]*(1080p|720p|480p|2160p|WEB|BluRay|HDRip|HDTV).*//I')"
+
+  # Normalize dots and whitespace
+  new="$(sanitize_name "$new")"
+
+  new="${new}.mkv"
+
+  if [[ "$base.mkv" != "$new" ]]; then
+    echo "Renaming:"
+    echo "  $base.mkv"
+    echo "  → $new"
+    mv "$file" "$dir/$new"
+  fi
+}
+
+############################################################
+# ================= STEP 0: STAGING ========================
+############################################################
+
+echo "Staging files into $RAW_DIR_NAME/"
+mkdir -p "$RAW_DIR"
+
+shopt -s nullglob
+for f in "$INPUT_DIR"/*.mkv "$INPUT_DIR"/*.zip; do
+  echo "  Moving $(basename "$f") → $RAW_DIR_NAME/"
+  mv "$f" "$RAW_DIR/"
+done
+shopt -u nullglob
+
+############################################################
+# ================= STEP 1: UNZIP ==========================
+############################################################
+
+for ZIP in "$RAW_DIR"/*.zip; do
   [[ -e "$ZIP" ]] || continue
 
-  BASENAME=$(basename "$ZIP" .zip)
-  TMP_DIR="$INPUT_DIR/${TMP_PREFIX}${BASENAME}"
+  BASENAME="$(basename "$ZIP" .zip)"
+  DEST_DIR="$RAW_DIR/$BASENAME"
 
-  if [[ -d "$TMP_DIR" ]]; then
-    echo "Already unzipped: $ZIP"
-    continue
-  fi
+  [[ -d "$DEST_DIR" ]] && continue
 
-  echo "Unzipping: $ZIP → $TMP_DIR"
-  mkdir -p "$TMP_DIR"
-  unzip -q "$ZIP" -d "$TMP_DIR"
+  echo "Unzipping: $(basename "$ZIP") → $DEST_DIR"
+  mkdir -p "$DEST_DIR"
+
+  unzip -oq "$ZIP" -d "$DEST_DIR" || \
+    echo "Warning: CRC issues in $ZIP — continuing"
 done
 
-############################
-# STEP 2: RUN PYTHON RENAMER
-############################
+############################################################
+# ================= STEP 2: RENAME =========================
+############################################################
 
-echo "Normalizing MKV filenames..."
+rename_in_dir() {
+  local dir="$1"
+  for f in "$dir"/*.mkv; do
+    [[ -e "$f" ]] || continue
+    clean_mkv_name "$f"
+  done
+}
 
-# Original input dir
-python3 "$PY_RENAMER" "$INPUT_DIR"
+rename_in_dir "$RAW_DIR"
 
-# Any unzip temp dirs
-for DIR in "$INPUT_DIR"/${TMP_PREFIX}*; do
-  [[ -d "$DIR" ]] || continue
-  python3 "$PY_RENAMER" "$DIR"
+for d in "$RAW_DIR"/*; do
+  [[ -d "$d" ]] || continue
+  rename_in_dir "$d"
 done
 
-############################
-# STEP 3: RUN PLEX HANDBRAKE LOGIC
-############################
+############################################################
+# ================= STEP 3: HANDBRAKE ======================
+############################################################
 
-echo "Starting Plex encode pipeline..."
-
-run_handbrake_on_dir() {
+encode_dir() {
   local SRC_DIR="$1"
 
   for FILE in "$SRC_DIR"/*.mkv; do
     [[ -e "$FILE" ]] || continue
 
-    # Export INPUT_DIR so your existing script logic works unchanged
-    INPUT_DIR="$SRC_DIR" \
-      bash "$PLEX_SCRIPT_DIR/plex_handbrake.sh"
-    break
+    BASENAME="$(basename "$FILE" .mkv)"
+
+    WIDTH="$(detect_resolution "$FILE")"
+    if (( WIDTH >= FOUR_K_MIN_WIDTH )); then
+      PRESET="$PRESET_4K"
+      TAG="4K"
+    else
+      PRESET="$PRESET_1080P"
+      TAG="1080p"
+    fi
+
+    if [[ "$BASENAME" =~ S([0-9]{2})E([0-9]{2}) ]]; then
+      SEASON="${BASH_REMATCH[1]}"
+      EPISODE="${BASH_REMATCH[2]}"
+
+      SERIES_RAW="${BASENAME%%S${SEASON}E${EPISODE}*}"
+      SERIES_NAME="$(sanitize_name "$SERIES_RAW")"
+
+      EP_TITLE_RAW="${BASENAME#*S${SEASON}E${EPISODE}}"
+      EP_TITLE="$(sanitize_name "$EP_TITLE_RAW")"
+      EP_TITLE="$(echo "$EP_TITLE" | sed 's/^[[:space:]\._-]*//')"
+
+      [[ "$SERIES_NAME" =~ $ANIME_SHOW_REGEX ]] \
+        && LIB_ROOT="$ANIME_DIR" \
+        || LIB_ROOT="$TV_DIR"
+
+      DEST_DIR="$LIB_ROOT/$SERIES_NAME/season$(printf "%02d" "$SEASON")"
+      mkdir -p "$DEST_DIR"
+
+      OUTPUT="$DEST_DIR/$SERIES_NAME S${SEASON}E${EPISODE}${EP_TITLE:+ $EP_TITLE}.mp4"
+    else
+      MOVIE_NAME="$(sanitize_name "$BASENAME")"
+
+      [[ "$MOVIE_NAME" =~ $ANIME_MOVIE_REGEX ]] \
+        && LIB_ROOT="$ANIME_DIR" \
+        || LIB_ROOT="$MOVIES_DIR"
+
+      DEST_DIR="$LIB_ROOT/$MOVIE_NAME"
+      mkdir -p "$DEST_DIR"
+
+      OUTPUT="$DEST_DIR/$MOVIE_NAME.mp4"
+    fi
+
+    [[ -f "$OUTPUT" && -s "$OUTPUT" ]] && continue
+
+    echo "Encoding [$TAG]: $FILE"
+    TMP="${OUTPUT}.partial"
+
+    HandBrakeCLI \
+      -i "$FILE" \
+      -o "$TMP" \
+      --preset="$PRESET" \
+      --format av_mp4 \
+      --optimize
+
+    mv "$TMP" "$OUTPUT"
   done
 }
 
-# Original input dir
-run_handbrake_on_dir "$INPUT_DIR"
+encode_dir "$RAW_DIR"
 
-# Any unzip temp dirs
-for DIR in "$INPUT_DIR"/${TMP_PREFIX}*; do
-  [[ -d "$DIR" ]] || continue
-  run_handbrake_on_dir "$DIR"
+for d in "$RAW_DIR"/*; do
+  [[ -d "$d" ]] || continue
+  encode_dir "$d"
 done
 
-############################
-# STEP 4: CLEANUP
-############################
+############################################################
+# ================= STEP 4: CLEANUP ========================
+############################################################
 
-echo "Cleaning up temp unzip directories..."
+if [[ "$KEEP_RAW" -eq 0 ]]; then
+  rm -rf "$RAW_DIR"
+fi
 
-for DIR in "$INPUT_DIR"/${TMP_PREFIX}*; do
-  [[ -d "$DIR" ]] || continue
-  rm -rf "$DIR"
-done
-
-echo "Pipeline complete."
+echo "Ingest complete."
 
