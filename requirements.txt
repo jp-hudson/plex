@@ -1,0 +1,9 @@
+
+---
+
+## Optional: requirements.txt
+If you want this repo to feel extra clean:
+
+```txt
+requests
+keyring
