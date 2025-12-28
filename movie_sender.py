@@ -29,13 +29,6 @@ SMTP_USER = "hudson.plex.media@gmail.com"
 EMAIL_FROM = "Hudson Plex Media <hudson.plex.media@gmail.com>"
 EMAIL_TO = [
     "jhudson2083@gmail.com",
-    "torpaulson@gmail.com",
-    "leahgannon14@gmail.com",
-    "garrettw731@gmail.com",
-    "bentleyrocket52000@gmail.com",
-    "hahuddy@gmail.com",
-    "hgannon40@gmail.com",
-    "rustyspydell@yahoo.com",
 ]
 
 # ---- Scheduling ----
