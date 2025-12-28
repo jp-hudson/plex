@@ -16,11 +16,13 @@ Each script serves a distinct role in the overall media workflow.
 ---
 Prereqs:
 ---
+```
 pip install requests
 pip install keyring
 pip install python-dateutil
 brew install gawk handbrake ffmpeg
 brew install gawk
+```
 ---
 
 ## `movie_sender.py`
