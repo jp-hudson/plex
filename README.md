@@ -1,93 +1,168 @@
-There are two scripts here:
+# Media Automation Scripts
 
-```
-movie_sender.py
-```
+This repository contains two primary scripts used to automate Plex media ingestion and weekly media notification emails.
 
-This script scans the plex media folder and looks for new additions. It scans every hour on your mac via launchctl. If it sees any new additions to the media diretory it will place the changes in pending. It is set to not send an email out under these conditions:
+---
 
-1) Mac must be on
-2) It must be Friday after 1PM
-3) There is a item in the pending state
-4) There has not been another email sent since the previous Friday
+## Overview
 
-If these conditions are met, an email with the media is sent to a list of users specified. 
+### Scripts Included
 
-The second script:
+- `movie_sender.py`
+- `plex_pipeline.sh`
 
-```
-plex_pipeline.sh
-```
-This script is used for ingesting downloaded media content that come as either .mkz or .zip. It will create a folder, unzip the contents, then rename the contents as it sees fit. Then it will create a folder on your media server location of the media and proceed to run either a 1080P or 2160P burn using handbrake. Once it completes it deletes the .zip and the extracted folder it created. A log file is created in the folder that it is run in.
+Each script serves a distinct role in the overall media workflow.
 
+---
 
-More in-depth setup / view of movie_sender.py below:
+## `movie_sender.py`
 
-movie_sender.py is setup with hudson.plex.media@gmail.com email account. Credentials are in bitwarden
+This script scans Plex media directories for new content and sends a summary email when specific conditions are met.
 
-In order to get things working so it querried the movies I had to create an omdb API key. This is necessary to check the IMDB DB and pull the rotten tomatoe rating if I can find it. I was able to do that by visiting:
+### What It Does
+
+- Scans Plex media folders **hourly**
+- Detects newly added media
+- Tracks new items in a **pending** state
+- Sends a **single weekly email** when all criteria are satisfied
+
+### Email Send Conditions
+
+An email **will only be sent** if **all** of the following conditions are met:
+
+1. The Mac is powered on  
+2. It is **Friday after 1:00 PM**  
+3. There is **at least one item** in the pending state  
+4. No email has been sent since the **previous Friday**
+
+If all conditions are met, a summary email listing newly added media is sent to a configured list of recipients.
+
+---
+
+## `plex_pipeline.sh`
+
+This script handles **media ingestion and transcoding** for downloaded content.
+
+### Supported Input Formats
+
+- `.mkv`
+- `.zip`
+
+### What It Does
+
+1. Creates a working directory  
+2. Unzips media when necessary  
+3. Renames files according to expected naming conventions  
+4. Creates a destination folder on the Plex media server  
+5. Runs HandBrake to transcode media:
+   - 1080p **or**
+   - 2160p (4K)  
+6. Performs cleanup:
+   - Deletes the original `.zip`
+   - Deletes temporary extracted directories  
+7. Writes a log file in the directory where the script is executed
+
+---
+
+## Detailed Setup: `movie_sender.py`
+
+### Email Account
+
+- Uses the Gmail account:  
+  **`hudson.plex.media@gmail.com`**
+- Credentials are stored securely in **Bitwarden**
+- No secrets are committed to the repository
+
+---
+
+### OMDb API (Movie Metadata)
+
+To retrieve IMDb and Rotten Tomatoes ratings, an OMDb API key is required.
+
+#### Obtain an API Key
+
+Visit:
 
 http://www.omdbapi.com/apikey.aspx
 
-I generated a free (1000 license key)
+A free tier (1,000 requests per day) is sufficient.
 
-I put the key into my keychain via:
+#### Store the API Key in macOS Keychain
 
-API for omdb
-security add-generic-password \                  
+```bash
+security add-generic-password \
   -a "omdb" \
   -s "omdb_api_key" \
-  -w ''
+  -w ""
+```
 
-For the gmail account I created a google app password. Then I added it to my keychain like
+---
 
-security add-generic-password \                                  
+### Gmail App Password
+
+A Google App Password is used for SMTP authentication.
+
+#### Store the Gmail App Password in Keychain
+
+```bash
+security add-generic-password \
   -a "hudson.plex.media@gmail.com" \
   -s "media_smtp_pass" \
   -w ""
+```
 
-launchctl start com.hudson.media-scan
+---
 
-This was necessary setup to send emails. Once I did that I could run my code at:
+## Running `movie_sender.py` Manually
 
+```bash
 /Users/jhudson/code/movie_sender.py
+```
 
-Check logs
+---
 
+## Logs
+
+```bash
 tail ~/.media_scan.log
 tail ~/.media_scan.err
-
-# Setting up the Cron job to run hourly on my mac. If you are running on a server you will use cron most likely. Here we use launchctl.
-
-On my mac.
-
-vi ~/Library/LaunchAgents/com.hudson.media-scan.plist
-
-and put in below:
-
 ```
+
+---
+
+## Scheduling with `launchctl` (macOS)
+
+The script is configured to run **hourly** using `launchctl`.
+
+### Create the Launch Agent
+
+Edit the file:
+
+```bash
+vi ~/Library/LaunchAgents/com.hudson.media-scan.plist
+```
+
+Paste the following:
+
+```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 
-  <!-- Name of the job -->
   <key>Label</key>
   <string>com.hudson.media-scan</string>
 
-  <!-- What to run -->
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
     <string>/Users/jhudson/code/movie_sender.py</string>
   </array>
 
-  <!-- Run every hour -->
   <key>StartInterval</key>
   <integer>3600</integer>
 
-  <!-- Logging -->
   <key>StandardOutPath</key>
   <string>/Users/jhudson/.media_scan.log</string>
 
@@ -98,15 +173,27 @@ and put in below:
 </plist>
 ```
 
-Load the job
+---
 
-```
+### Load the Job
+
+```bash
 launchctl load ~/Library/LaunchAgents/com.hudson.media-scan.plist
 ```
 
-Test it immediatly:
+---
 
-```
+### Run Immediately (for Testing)
+
+```bash
 launchctl start com.hudson.media-scan
 ```
 
+---
+
+## Notes
+
+- If running on a **server**, use `cron` instead of `launchctl`
+- All credentials are stored in **macOS Keychain**
+- No secrets are committed to version control
+- Logs are written to the user’s home directory for easy inspection
