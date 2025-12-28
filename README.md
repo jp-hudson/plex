@@ -14,6 +14,10 @@ This repository contains two primary scripts used to automate Plex media ingesti
 Each script serves a distinct role in the overall media workflow.
 
 ---
+Prereqs:
+---
+brew install gawk
+---
 
 ## `movie_sender.py`
 
