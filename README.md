@@ -1,6 +1,15 @@
-movie_sender.py is setup with hudson.plex.media@gmail.com email account. Credentials are in bitwarded
+This script scans the plex media folder and looks for new additions. It scans every hour on your mac via launchctl. If it sees any new additions to the media diretory it will place the changes in pending. It is set to not send an email out under these conditions:
 
-In order to get things working so it querried the movies I had to create an omdb API key. I was able to do that by visiting:
+1) Mac must be on
+2) It must be Friday after 1PM
+3) There is a item in the pending state
+4) There has not been another email sent since the previous Friday
+
+If these conditions are met, an email with the media is sent to a list of users specified. More in-depth view below:
+
+movie_sender.py is setup with hudson.plex.media@gmail.com email account. Credentials are in bitwarden
+
+In order to get things working so it querried the movies I had to create an omdb API key. This is necessary to check the IMDB DB and pull the rotten tomatoe rating if I can find it. I was able to do that by visiting:
 
 http://www.omdbapi.com/apikey.aspx
 
@@ -32,7 +41,7 @@ Check logs
 tail ~/.media_scan.log
 tail ~/.media_scan.err
 
-#Setting up the Cron
+# Setting up the Cron job to run hourly on my mac. If you are running on a server you will use cron most likely. Here we use launchctl.
 
 On my mac.
 
@@ -84,3 +93,4 @@ Test it immediatly:
 ```
 launchctl start com.hudson.media-scan
 ```
+
