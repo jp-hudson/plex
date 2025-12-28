@@ -1,5 +1,4 @@
-Media Scanner is setup with hudson.plex.media@gmail.com email account. Credentials are in bitwarded
-
+movie_sender.py is setup with hudson.plex.media@gmail.com email account. Credentials are in bitwarded
 
 In order to get things working so it querried the movies I had to create an omdb API key. I was able to do that by visiting:
 
