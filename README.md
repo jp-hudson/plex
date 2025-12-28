@@ -58,15 +58,9 @@ and put in below:
     <string>/Users/jhudson/code/movie_sender.py</string>
   </array>
 
-  <!-- Run once a week -->
-  <key>StartCalendarInterval</key>
-  <dict>
-    <!-- Sunday -->
-    <key>Weekday</key><integer>7</integer>
-    <!-- 8 PM -->
-    <key>Hour</key><integer>20</integer>
-    <key>Minute</key><integer>0</integer>
-  </dict>
+  <!-- Run every hour -->
+  <key>StartInterval</key>
+  <integer>3600</integer>
 
   <!-- Logging -->
   <key>StandardOutPath</key>
