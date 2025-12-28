@@ -1,3 +1,9 @@
+There are two scripts here:
+
+```
+movie_sender.py
+```
+
 This script scans the plex media folder and looks for new additions. It scans every hour on your mac via launchctl. If it sees any new additions to the media diretory it will place the changes in pending. It is set to not send an email out under these conditions:
 
 1) Mac must be on
@@ -5,7 +11,17 @@ This script scans the plex media folder and looks for new additions. It scans ev
 3) There is a item in the pending state
 4) There has not been another email sent since the previous Friday
 
-If these conditions are met, an email with the media is sent to a list of users specified. More in-depth view below:
+If these conditions are met, an email with the media is sent to a list of users specified. 
+
+The second script:
+
+```
+plex_pipeline.sh
+```
+This script is used for ingesting downloaded media content that come as either .mkz or .zip. It will create a folder, unzip the contents, then rename the contents as it sees fit. Then it will create a folder on your media server location of the media and proceed to run either a 1080P or 2160P burn using handbrake. Once it completes it deletes the .zip and the extracted folder it created. A log file is created in the folder that it is run in.
+
+
+More in-depth setup / view of movie_sender.py below:
 
 movie_sender.py is setup with hudson.plex.media@gmail.com email account. Credentials are in bitwarden
 
