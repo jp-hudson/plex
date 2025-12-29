@@ -3,34 +3,22 @@ set -euo pipefail
 
 ############################################################
 # ======================= CONFIG ===========================
-# All user-adjustable knobs live here
 ############################################################
 
-# Where you drop new downloads (or pass as arg)
 INPUT_DIR="${1:-/Users/jhudson/Downloads/thunder3}"
-
-# Staging directory (created inside INPUT_DIR)
 RAW_DIR_NAME="handbrake_raw"
 
-# Plex library root
 PLEX_ROOT="/Volumes/Media"
-
-# Plex libraries
 MOVIES_DIR="$PLEX_ROOT/Movies"
 TV_DIR="$PLEX_ROOT/TV"
 ANIME_DIR="$PLEX_ROOT/Anime"
 
-# HandBrake presets
 PRESET_1080P="HQ 1080p30 Surround"
 PRESET_4K="HQ 2160p60 4K HEVC Surround"
-
-# Width threshold to switch to 4K preset
 FOUR_K_MIN_WIDTH=3000
 
-# Keep staging directory after completion? (1=yes, 0=no)
 KEEP_RAW=0
 
-# Anime detection keywords (simple heuristic)
 ANIME_SHOW_REGEX="Naruto|Bleach|One Piece|Attack on Titan"
 ANIME_MOVIE_REGEX="Ghibli|Spirited Away|Your Name|Suzume"
 
@@ -40,7 +28,6 @@ ANIME_MOVIE_REGEX="Ghibli|Spirited Away|Your Name|Suzume"
 
 LOG_DIR="$INPUT_DIR/logs"
 LOG_FILE="$LOG_DIR/plex_ingest.log"
-
 mkdir -p "$LOG_DIR"
 
 exec > >(gawk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -a "$LOG_FILE") 2>&1
@@ -49,7 +36,7 @@ exec > >(gawk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -
 # ==================== PRE-FLIGHT ==========================
 ############################################################
 
-for cmd in unzip ffprobe HandBrakeCLI sed; do
+for cmd in unzip ffprobe HandBrakeCLI sed gawk; do
   command -v "$cmd" >/dev/null || {
     echo "Missing dependency: $cmd"
     exit 1
@@ -73,33 +60,33 @@ sanitize_name() {
   echo "$1" | sed \
     -e 's/\./ /g' \
     -e 's/_/ /g' \
-    -e 's/  */ /g' \
-    -e 's/^ *//;s/ *$//'
+    -e 's/[[:space:]]\+/ /g' \
+    -e 's/^ //;s/ $//'
 }
 
-# === INLINE moviev1.py LOGIC ===
+############################################################
+# ================= MKV CLEANUP (SAFE) ====================
+############################################################
+
 clean_mkv_name() {
   local file="$1"
-  local dir base ext new
+  local dir base name cleaned
 
   dir="$(dirname "$file")"
   base="$(basename "$file")"
-  ext="${base##*.}"
-  base="${base%.*}"
+  name="${base%.mkv}"
 
-  [[ "$ext" != "mkv" ]] && return
+  # Cut at first technical marker (original behavior)
+  cleaned="$(echo "$name" | sed -E 's/[[:space:]\(]*(1080p|720p|480p|2160p|WEB|WEB[- ]DL|BluRay|HDRip|HDTV).*//I')"
 
-  new="$base"
+  cleaned="$(sanitize_name "$cleaned")"
+  cleaned="${cleaned}.mkv"
 
-  new="$(echo "$new" | sed -E 's/[[:space:]\(]*(1080p|720p|480p|2160p|WEB|BluRay|HDRip|HDTV).*//I')"
-  new="$(sanitize_name "$new")"
-  new="${new}.mkv"
-
-  if [[ "$base.mkv" != "$new" ]]; then
+  if [[ "$base" != "$cleaned" ]]; then
     echo "Renaming:"
-    echo "  $base.mkv"
-    echo "  → $new"
-    mv "$file" "$dir/$new"
+    echo "  $base"
+    echo "  → $cleaned"
+    mv "$file" "$dir/$cleaned"
   fi
 }
 
@@ -149,7 +136,6 @@ rename_in_dir() {
 }
 
 rename_in_dir "$RAW_DIR"
-
 for d in "$RAW_DIR"/*; do
   [[ -d "$d" ]] || continue
   rename_in_dir "$d"
@@ -176,6 +162,9 @@ encode_dir() {
       TAG="1080p"
     fi
 
+    ########################################################
+    # TV / ANIME
+    ########################################################
     if [[ "$BASENAME" =~ S([0-9]{2})E([0-9]{2}) ]]; then
       SEASON="${BASH_REMATCH[1]}"
       EPISODE="${BASH_REMATCH[2]}"
@@ -195,16 +184,25 @@ encode_dir() {
       mkdir -p "$DEST_DIR"
 
       OUTPUT="$DEST_DIR/$SERIES_NAME S${SEASON}E${EPISODE}${EP_TITLE:+ $EP_TITLE}.mp4"
+
+    ########################################################
+    # MOVIES (FIXED FOLDER LOGIC)
+    ########################################################
     else
       MOVIE_FULL="$(sanitize_name "$BASENAME")"
 
-      if [[ "$MOVIE_FULL" =~ ^(.+)[[:space:]]([0-9]{4})$ ]]; then
+      # Extract title + year (if present)
+      if [[ "$MOVIE_FULL" =~ ^(.+)[[:space:]]([0-9]{4})(.*)$ ]]; then
         MOVIE_TITLE="${BASH_REMATCH[1]}"
         MOVIE_YEAR="${BASH_REMATCH[2]}"
       else
         MOVIE_TITLE="$MOVIE_FULL"
         MOVIE_YEAR=""
       fi
+
+      # Final safety: strip scene tags from FOLDER NAME ONLY
+      MOVIE_TITLE="$(echo "$MOVIE_TITLE" | sed -E 's/\b(REPACK|PROPER|REAL|EXTENDED|UNRATED|LIMITED)\b//Ig')"
+      MOVIE_TITLE="$(sanitize_name "$MOVIE_TITLE")"
 
       [[ "$MOVIE_TITLE" =~ $ANIME_MOVIE_REGEX ]] \
         && LIB_ROOT="$ANIME_DIR" \
@@ -213,11 +211,7 @@ encode_dir() {
       DEST_DIR="$LIB_ROOT/$MOVIE_TITLE"
       mkdir -p "$DEST_DIR"
 
-      if [[ -n "$MOVIE_YEAR" ]]; then
-        OUTPUT="$DEST_DIR/$MOVIE_TITLE $MOVIE_YEAR.mp4"
-      else
-        OUTPUT="$DEST_DIR/$MOVIE_TITLE.mp4"
-      fi
+      OUTPUT="$DEST_DIR/$MOVIE_TITLE${MOVIE_YEAR:+ $MOVIE_YEAR}.mp4"
     fi
 
     [[ -f "$OUTPUT" && -s "$OUTPUT" ]] && continue
@@ -237,7 +231,6 @@ encode_dir() {
 }
 
 encode_dir "$RAW_DIR"
-
 for d in "$RAW_DIR"/*; do
   [[ -d "$d" ]] || continue
   encode_dir "$d"

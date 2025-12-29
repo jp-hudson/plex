@@ -36,7 +36,7 @@ SEND_WEEKDAY = 4        # Friday (Mon=0)
 SEND_HOUR = 13          # 1 PM
 WEEK_SECONDS = 7 * 24 * 60 * 60
 
-PREVIEW_EMAIL = True   # 🔧 True = preview only, no purge, no timestamp
+PREVIEW_EMAIL =  False   # 🔧 True = preview only, no purge, no timestamp
 
 EMERGENCY_QUOTES = [
     "“Progress, not perfection.”",
