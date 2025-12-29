@@ -43,10 +43,7 @@ LOG_FILE="$LOG_DIR/plex_ingest.log"
 
 mkdir -p "$LOG_DIR"
 
-# Timestamp every line, log to file + console
 exec > >(gawk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -a "$LOG_FILE") 2>&1
-
-
 
 ############################################################
 # ==================== PRE-FLIGHT ==========================
@@ -94,12 +91,8 @@ clean_mkv_name() {
 
   new="$base"
 
-  # Strip quality / source junk
   new="$(echo "$new" | sed -E 's/[[:space:]\(]*(1080p|720p|480p|2160p|WEB|BluRay|HDRip|HDTV).*//I')"
-
-  # Normalize dots and whitespace
   new="$(sanitize_name "$new")"
-
   new="${new}.mkv"
 
   if [[ "$base.mkv" != "$new" ]]; then
@@ -203,16 +196,28 @@ encode_dir() {
 
       OUTPUT="$DEST_DIR/$SERIES_NAME S${SEASON}E${EPISODE}${EP_TITLE:+ $EP_TITLE}.mp4"
     else
-      MOVIE_NAME="$(sanitize_name "$BASENAME")"
+      MOVIE_FULL="$(sanitize_name "$BASENAME")"
 
-      [[ "$MOVIE_NAME" =~ $ANIME_MOVIE_REGEX ]] \
+      if [[ "$MOVIE_FULL" =~ ^(.+)[[:space:]]([0-9]{4})$ ]]; then
+        MOVIE_TITLE="${BASH_REMATCH[1]}"
+        MOVIE_YEAR="${BASH_REMATCH[2]}"
+      else
+        MOVIE_TITLE="$MOVIE_FULL"
+        MOVIE_YEAR=""
+      fi
+
+      [[ "$MOVIE_TITLE" =~ $ANIME_MOVIE_REGEX ]] \
         && LIB_ROOT="$ANIME_DIR" \
         || LIB_ROOT="$MOVIES_DIR"
 
-      DEST_DIR="$LIB_ROOT/$MOVIE_NAME"
+      DEST_DIR="$LIB_ROOT/$MOVIE_TITLE"
       mkdir -p "$DEST_DIR"
 
-      OUTPUT="$DEST_DIR/$MOVIE_NAME.mp4"
+      if [[ -n "$MOVIE_YEAR" ]]; then
+        OUTPUT="$DEST_DIR/$MOVIE_TITLE $MOVIE_YEAR.mp4"
+      else
+        OUTPUT="$DEST_DIR/$MOVIE_TITLE.mp4"
+      fi
     fi
 
     [[ -f "$OUTPUT" && -s "$OUTPUT" ]] && continue

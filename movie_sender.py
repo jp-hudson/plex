@@ -35,7 +35,8 @@ EMAIL_TO = [
 SEND_WEEKDAY = 4        # Friday (Mon=0)
 SEND_HOUR = 13          # 1 PM
 WEEK_SECONDS = 7 * 24 * 60 * 60
-TEST_MODE = False       # 🔧 set True to force send for testing
+
+PREVIEW_EMAIL = False   # 🔧 True = preview only, no purge, no timestamp
 
 EMERGENCY_QUOTES = [
     "“Progress, not perfection.”",
@@ -132,6 +133,24 @@ def rotten_tomatoes_score(title):
     return None
 
 
+# ---------- Pending sort helper ----------
+
+def season_sort_key(item):
+    media_rank = {"Movies": 0, "TV": 1, "Anime": 2}.get(item["type"], 99)
+
+    show = item["name"]
+    season_num = 0
+
+    if "–" in item["name"]:
+        show, season = item["name"].split("–", 1)
+        show = show.strip()
+        digits = "".join(c for c in season if c.isdigit())
+        if digits.isdigit():
+            season_num = int(digits)
+
+    return (media_rank, show.lower(), season_num)
+
+
 # ---------- Media scan ----------
 
 def scan_media():
@@ -165,7 +184,6 @@ def scan_media():
 
 def load_state():
     if not os.path.exists(STATE_FILE):
-        print("🆕 Initializing state")
         return {"items": [], "pending": [], "last_email_ts": None}
 
     with open(STATE_FILE) as f:
@@ -180,12 +198,11 @@ def load_state():
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
-    print("💾 State saved")
 
 
 # ---------- Email ----------
 
-def send_email(pending):
+def send_email(pending, recipients):
     grouped = defaultdict(list)
     for i in pending:
         grouped[i["type"]].append(i)
@@ -196,7 +213,6 @@ def send_email(pending):
     end = datetime.now()
     start = end - timedelta(days=7)
 
-    # 🎲 Surprise movie pick
     movies = grouped.get("Movies", [])
     surprise = random.choice(movies) if movies else None
 
@@ -247,15 +263,13 @@ def send_email(pending):
     msg = MIMEText("\n".join(text))
     msg["Subject"] = "🎬 John Plex Weekly Digest"
     msg["From"] = EMAIL_FROM
-    msg["To"] = ", ".join(EMAIL_TO)
+    msg["To"] = ", ".join(recipients)
 
     pw = get_smtp_password()
     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as s:
         s.starttls()
         s.login(SMTP_USER, pw)
-        s.send_message(msg)
-
-    print(f"📧 Email sent with {len(pending)} items")
+        s.send_message(msg, to_addrs=recipients)
 
 
 # ---------- Main ----------
@@ -264,25 +278,19 @@ def main():
     state = load_state()
     current = scan_media()
 
-    print(f"🔍 Scan complete: {len(current)} items found")
-
-    # Baseline guard
     if not state["items"] and not state["pending"] and state["last_email_ts"] is None:
         state["items"] = current
         save_state(state)
-        print("✅ Baseline established")
         return
 
     seen = {i["path"] for i in state["items"]}
     pending_paths = {i["path"] for i in state["pending"]}
 
-    added = 0
     for i in current:
         if i["path"] not in seen and i["path"] not in pending_paths:
             state["pending"].append(i)
-            added += 1
 
-    print(f"➕ {added} new items added to pending" if added else "➖ No new items")
+    state["pending"].sort(key=season_sort_key)
 
     now = datetime.now()
     is_send_day = now.weekday() == SEND_WEEKDAY
@@ -292,18 +300,13 @@ def main():
         time.time() - state["last_email_ts"] >= WEEK_SECONDS
     )
 
-    should_send = (
-        state["pending"] and
-        (TEST_MODE or (is_send_day and is_after_hour and week_elapsed))
-    )
-
-    if should_send:
-        send_email(state["pending"])
-        state["pending"] = []
-        state["last_email_ts"] = time.time()
-        print("✅ Weekly email sent")
-    else:
-        print("⏳ Accumulating items")
+    if state["pending"] and (PREVIEW_EMAIL or (is_send_day and is_after_hour and week_elapsed)):
+        if PREVIEW_EMAIL:
+            send_email(state["pending"], ["jhudson2083@gmail.com"])
+        else:
+            send_email(state["pending"], EMAIL_TO)
+            state["pending"] = []
+            state["last_email_ts"] = time.time()
 
     state["items"] = current
     save_state(state)
