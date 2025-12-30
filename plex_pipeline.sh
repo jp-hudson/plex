@@ -64,23 +64,43 @@ sanitize_name() {
     -e 's/^ //;s/ $//'
 }
 
+
 ############################################################
-# ================= MKV CLEANUP (SAFE) ====================
+# ============== MKV CLEANUP (YEAR-CORRECT) ===============
 ############################################################
 
 clean_mkv_name() {
   local file="$1"
-  local dir base name cleaned
+  local dir base name title year cleaned
 
   dir="$(dirname "$file")"
   base="$(basename "$file")"
   name="${base%.mkv}"
 
-  # Cut at first technical marker (original behavior)
-  cleaned="$(echo "$name" | sed -E 's/[[:space:]\(]*(1080p|720p|480p|2160p|WEB|WEB[- ]DL|BluRay|HDRip|HDTV).*//I')"
+  # 1) Extract a REAL year (1900–2099, not followed by 'p')
+  if echo "$name" | grep -qE '([[:space:]\(])(19[0-9]{2}|20[0-9]{2})([[:space:]\)]|$)'; then
+    year="$(echo "$name" | sed -E 's/.*[[:space:]\(](19[0-9]{2}|20[0-9]{2})([[:space:]\)]|$).*/\1/')"
+  else
+    year=""
+  fi
 
-  cleaned="$(sanitize_name "$cleaned")"
-  cleaned="${cleaned}.mkv"
+  # 2) Remove ALL technical / release junk
+  title="$(echo "$name" | sed -E 's/[[:space:]\(]*(2160p|1080p|720p|480p|WEB|WEB[- ]DL|BluRay|HDRip|HDTV|NF|AMZN|x264|x265|H\.?264|H\.?265).*//Ig')"
+
+  # 3) Remove scene tags
+  title="$(echo "$title" | sed -E 's/\b(REPACK|PROPER|REAL|EXTENDED|UNRATED|LIMITED|GHOST)\b//Ig')"
+
+  # 4) Remove any year remnants from title
+  title="$(echo "$title" | sed -E 's/[[:space:]\(]*(19[0-9]{2}|20[0-9]{2})[\)]*//g')"
+
+  title="$(sanitize_name "$title")"
+
+  # 5) Reassemble deterministically
+  if [[ -n "$year" ]]; then
+    cleaned="$title ($year).mkv"
+  else
+    cleaned="$title.mkv"
+  fi
 
   if [[ "$base" != "$cleaned" ]]; then
     echo "Renaming:"
@@ -89,6 +109,7 @@ clean_mkv_name() {
     mv "$file" "$dir/$cleaned"
   fi
 }
+
 
 ############################################################
 # ================= STEP 0: STAGING ========================
@@ -186,21 +207,15 @@ encode_dir() {
       OUTPUT="$DEST_DIR/$SERIES_NAME S${SEASON}E${EPISODE}${EP_TITLE:+ $EP_TITLE}.mp4"
 
     ########################################################
-    # MOVIES (FIXED FOLDER LOGIC)
+    # MOVIES (PLEX-CORRECT)
     ########################################################
     else
-      MOVIE_FULL="$(sanitize_name "$BASENAME")"
-
-      # Extract title + year (if present)
-      if [[ "$MOVIE_FULL" =~ ^(.+)[[:space:]]([0-9]{4})(.*)$ ]]; then
-        MOVIE_TITLE="${BASH_REMATCH[1]}"
-        MOVIE_YEAR="${BASH_REMATCH[2]}"
-      else
-        MOVIE_TITLE="$MOVIE_FULL"
-        MOVIE_YEAR=""
+      MOVIE_YEAR=""
+      if echo "$BASENAME" | grep -qE '\([0-9]{4}\)$|[[:space:]][0-9]{4}$'; then
+        MOVIE_YEAR="$(echo "$BASENAME" | sed -E 's/.*[[:space:]\(]([0-9]{4})\)?$/\1/')"
       fi
 
-      # Final safety: strip scene tags from FOLDER NAME ONLY
+      MOVIE_TITLE="$(echo "$BASENAME" | sed -E 's/[[:space:]\(]*[0-9]{4}\)?$//')"
       MOVIE_TITLE="$(echo "$MOVIE_TITLE" | sed -E 's/\b(REPACK|PROPER|REAL|EXTENDED|UNRATED|LIMITED)\b//Ig')"
       MOVIE_TITLE="$(sanitize_name "$MOVIE_TITLE")"
 
@@ -211,7 +226,11 @@ encode_dir() {
       DEST_DIR="$LIB_ROOT/$MOVIE_TITLE"
       mkdir -p "$DEST_DIR"
 
-      OUTPUT="$DEST_DIR/$MOVIE_TITLE${MOVIE_YEAR:+ $MOVIE_YEAR}.mp4"
+      if [[ -n "$MOVIE_YEAR" ]]; then
+        OUTPUT="$DEST_DIR/$MOVIE_TITLE $MOVIE_YEAR.mp4"
+      else
+        OUTPUT="$DEST_DIR/$MOVIE_TITLE.mp4"
+      fi
     fi
 
     [[ -f "$OUTPUT" && -s "$OUTPUT" ]] && continue
