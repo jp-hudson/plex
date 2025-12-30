@@ -28,9 +28,15 @@ ANIME_MOVIE_REGEX="Ghibli|Spirited Away|Your Name|Suzume"
 
 LOG_DIR="$INPUT_DIR/logs"
 LOG_FILE="$LOG_DIR/plex_ingest.log"
+INGEST_LOG="$LOG_DIR/ingest_manifest.log"
+
 mkdir -p "$LOG_DIR"
 
+# Main verbose log (existing behavior)
 exec > >(gawk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -a "$LOG_FILE") 2>&1
+
+# Ingest manifest header
+echo "===== Ingest run $(date '+%Y-%m-%d %H:%M:%S') =====" >> "$INGEST_LOG"
 
 ############################################################
 # ==================== PRE-FLIGHT ==========================
@@ -64,38 +70,33 @@ sanitize_name() {
     -e 's/^ //;s/ $//'
 }
 
-
 ############################################################
 # ============== MKV CLEANUP (YEAR-CORRECT) ===============
 ############################################################
 
 clean_mkv_name() {
   local file="$1"
-  local dir base name title year cleaned
+  local dir base name norm title year cleaned
 
   dir="$(dirname "$file")"
   base="$(basename "$file")"
   name="${base%.mkv}"
 
-  # 1) Extract a REAL year (1900–2099, not followed by 'p')
-  if echo "$name" | grep -qE '([[:space:]\(])(19[0-9]{2}|20[0-9]{2})([[:space:]\)]|$)'; then
-    year="$(echo "$name" | sed -E 's/.*[[:space:]\(](19[0-9]{2}|20[0-9]{2})([[:space:]\)]|$).*/\1/')"
+  norm="$(echo "$name" | sed 's/[._]/ /g')"
+
+  if echo "$norm" | grep -qE '(^|[[:space:]])(19[0-9]{2}|20[0-9]{2})([[:space:]]|$)'; then
+    year="$(echo "$norm" | sed -E 's/.*(^|[[:space:]])(19[0-9]{2}|20[0-9]{2})([[:space:]]|$).*/\2/')"
   else
     year=""
   fi
 
-  # 2) Remove ALL technical / release junk
-  title="$(echo "$name" | sed -E 's/[[:space:]\(]*(2160p|1080p|720p|480p|WEB|WEB[- ]DL|BluRay|HDRip|HDTV|NF|AMZN|x264|x265|H\.?264|H\.?265).*//Ig')"
+  title="$(echo "$norm" | sed -E 's/(^|[[:space:]])(19[0-9]{2}|20[0-9]{2})([[:space:]]|$)/ /g')"
 
-  # 3) Remove scene tags
-  title="$(echo "$title" | sed -E 's/\b(REPACK|PROPER|REAL|EXTENDED|UNRATED|LIMITED|GHOST)\b//Ig')"
+  title="$(echo "$title" | sed -E 's/[[:space:]\(]*(2160p|1080p|720p|480p|WEB[- ]DL|BluRay|HDRip|HDTV|NF|AMZN|REPACK|x264|x265|H\.?264|H\.?265).*//Ig')"
 
-  # 4) Remove any year remnants from title
-  title="$(echo "$title" | sed -E 's/[[:space:]\(]*(19[0-9]{2}|20[0-9]{2})[\)]*//g')"
 
   title="$(sanitize_name "$title")"
 
-  # 5) Reassemble deterministically
   if [[ -n "$year" ]]; then
     cleaned="$title ($year).mkv"
   else
@@ -106,10 +107,10 @@ clean_mkv_name() {
     echo "Renaming:"
     echo "  $base"
     echo "  → $cleaned"
+    echo "RENAME | $base -> $cleaned" >> "$INGEST_LOG"
     mv "$file" "$dir/$cleaned"
   fi
 }
-
 
 ############################################################
 # ================= STEP 0: STAGING ========================
@@ -207,7 +208,7 @@ encode_dir() {
       OUTPUT="$DEST_DIR/$SERIES_NAME S${SEASON}E${EPISODE}${EP_TITLE:+ $EP_TITLE}.mp4"
 
     ########################################################
-    # MOVIES (PLEX-CORRECT)
+    # MOVIES
     ########################################################
     else
       MOVIE_YEAR=""
@@ -216,7 +217,6 @@ encode_dir() {
       fi
 
       MOVIE_TITLE="$(echo "$BASENAME" | sed -E 's/[[:space:]\(]*[0-9]{4}\)?$//')"
-      MOVIE_TITLE="$(echo "$MOVIE_TITLE" | sed -E 's/\b(REPACK|PROPER|REAL|EXTENDED|UNRATED|LIMITED)\b//Ig')"
       MOVIE_TITLE="$(sanitize_name "$MOVIE_TITLE")"
 
       [[ "$MOVIE_TITLE" =~ $ANIME_MOVIE_REGEX ]] \
@@ -233,9 +233,14 @@ encode_dir() {
       fi
     fi
 
-    [[ -f "$OUTPUT" && -s "$OUTPUT" ]] && continue
+    if [[ -f "$OUTPUT" && -s "$OUTPUT" ]]; then
+      echo "SKIP | DEST exists: $OUTPUT" >> "$INGEST_LOG"
+      continue
+    fi
 
+    echo "INGEST | SRC='$FILE' | DEST='$OUTPUT' | TAG=$TAG" >> "$INGEST_LOG"
     echo "Encoding [$TAG]: $FILE"
+
     TMP="${OUTPUT}.partial"
 
     HandBrakeCLI \
