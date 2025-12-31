@@ -14,7 +14,6 @@ TV_DIR="$PLEX_ROOT/TV"
 ANIME_DIR="$PLEX_ROOT/Anime"
 
 PRESET_1080P="HQ 1080p30 Surround"
-PRESET_4K="HQ 2160p60 4K HEVC Surround"
 FOUR_K_MIN_WIDTH=3000
 
 KEEP_RAW=0
@@ -32,10 +31,7 @@ INGEST_LOG="$LOG_DIR/ingest_manifest.log"
 
 mkdir -p "$LOG_DIR"
 
-# Main verbose log (existing behavior)
 exec > >(gawk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -a "$LOG_FILE") 2>&1
-
-# Ingest manifest header
 echo "===== Ingest run $(date '+%Y-%m-%d %H:%M:%S') =====" >> "$INGEST_LOG"
 
 ############################################################
@@ -55,11 +51,12 @@ RAW_DIR="$INPUT_DIR/$RAW_DIR_NAME"
 # ====================== HELPERS ===========================
 ############################################################
 
+# Outputs: WIDTH HEIGHT
 detect_resolution() {
   ffprobe -v error \
     -select_streams v:0 \
-    -show_entries stream=width \
-    -of csv=p=0 "$1"
+    -show_entries stream=width,height \
+    -of csv=p=0 "$1" | tr ',' ' '
 }
 
 sanitize_name() {
@@ -71,7 +68,7 @@ sanitize_name() {
 }
 
 ############################################################
-# ============== MKV CLEANUP (YEAR-CORRECT) ===============
+# ============== MKV CLEANUP (YEAR-SAFE) ==================
 ############################################################
 
 clean_mkv_name() {
@@ -82,18 +79,21 @@ clean_mkv_name() {
   base="$(basename "$file")"
   name="${base%.mkv}"
 
+  # Normalize separators
   norm="$(echo "$name" | sed 's/[._]/ /g')"
 
-  if echo "$norm" | grep -qE '(^|[[:space:]])(19[0-9]{2}|20[0-9]{2})([[:space:]]|$)'; then
-    year="$(echo "$norm" | sed -E 's/.*(^|[[:space:]])(19[0-9]{2}|20[0-9]{2})([[:space:]]|$).*/\2/')"
+  # Extract year FIRST
+  year="$(echo "$norm" | grep -oE '(19|20)[0-9]{2}' | head -n1 || true)"
+
+  # Remove everything from year onward
+  if [[ -n "$year" ]]; then
+    title="$(echo "$norm" | sed -E "s/[[:space:]]*\(?$year\)?.*//")"
   else
-    year=""
+    title="$norm"
   fi
 
-  title="$(echo "$norm" | sed -E 's/(^|[[:space:]])(19[0-9]{2}|20[0-9]{2})([[:space:]]|$)/ /g')"
-
-  title="$(echo "$title" | sed -E 's/[[:space:]\(]*(2160p|1080p|720p|480p|WEB[- ]DL|BluRay|HDRip|HDTV|NF|AMZN|REPACK|x264|x265|H\.?264|H\.?265).*//Ig')"
-
+  # Remove common junk
+  title="$(echo "$title" | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265).*//Ig')"
 
   title="$(sanitize_name "$title")"
 
@@ -104,13 +104,12 @@ clean_mkv_name() {
   fi
 
   if [[ "$base" != "$cleaned" ]]; then
-    echo "Renaming:"
-    echo "  $base"
-    echo "  → $cleaned"
     echo "RENAME | $base -> $cleaned" >> "$INGEST_LOG"
     mv "$file" "$dir/$cleaned"
   fi
 }
+
+
 
 ############################################################
 # ================= STEP 0: STAGING ========================
@@ -121,7 +120,6 @@ mkdir -p "$RAW_DIR"
 
 shopt -s nullglob
 for f in "$INPUT_DIR"/*.mkv "$INPUT_DIR"/*.zip; do
-  echo "  Moving $(basename "$f") → $RAW_DIR_NAME/"
   mv "$f" "$RAW_DIR/"
 done
 shopt -u nullglob
@@ -132,17 +130,10 @@ shopt -u nullglob
 
 for ZIP in "$RAW_DIR"/*.zip; do
   [[ -e "$ZIP" ]] || continue
-
-  BASENAME="$(basename "$ZIP" .zip)"
-  DEST_DIR="$RAW_DIR/$BASENAME"
-
+  DEST_DIR="$RAW_DIR/$(basename "$ZIP" .zip)"
   [[ -d "$DEST_DIR" ]] && continue
-
-  echo "Unzipping: $(basename "$ZIP") → $DEST_DIR"
   mkdir -p "$DEST_DIR"
-
-  unzip -oq "$ZIP" -d "$DEST_DIR" || \
-    echo "Warning: CRC issues in $ZIP — continuing"
+  unzip -oq "$ZIP" -d "$DEST_DIR" || true
 done
 
 ############################################################
@@ -159,8 +150,7 @@ rename_in_dir() {
 
 rename_in_dir "$RAW_DIR"
 for d in "$RAW_DIR"/*; do
-  [[ -d "$d" ]] || continue
-  rename_in_dir "$d"
+  [[ -d "$d" ]] && rename_in_dir "$d"
 done
 
 ############################################################
@@ -175,98 +165,54 @@ encode_dir() {
 
     BASENAME="$(basename "$FILE" .mkv)"
 
-    WIDTH="$(detect_resolution "$FILE")"
-    if (( WIDTH >= FOUR_K_MIN_WIDTH )); then
-      PRESET="$PRESET_4K"
-      TAG="4K"
-    else
-      PRESET="$PRESET_1080P"
-      TAG="1080p"
-    fi
+    read -r WIDTH HEIGHT < <(detect_resolution "$FILE")
+    echo "Detected resolution: ${WIDTH}x${HEIGHT}"
 
-    ########################################################
-    # TV / ANIME
-    ########################################################
-    if [[ "$BASENAME" =~ S([0-9]{2})E([0-9]{2}) ]]; then
-      SEASON="${BASH_REMATCH[1]}"
-      EPISODE="${BASH_REMATCH[2]}"
+    [[ "$WIDTH" =~ ^[0-9]+$ ]] || {
+      echo "ERROR: Invalid width '$WIDTH'"
+      exit 1
+    }
 
-      SERIES_RAW="${BASENAME%%S${SEASON}E${EPISODE}*}"
-      SERIES_NAME="$(sanitize_name "$SERIES_RAW")"
+    (( WIDTH >= FOUR_K_MIN_WIDTH )) && TAG="4K" || TAG="1080p"
 
-      EP_TITLE_RAW="${BASENAME#*S${SEASON}E${EPISODE}}"
-      EP_TITLE="$(sanitize_name "$EP_TITLE_RAW")"
-      EP_TITLE="$(echo "$EP_TITLE" | sed 's/^[[:space:]\._-]*//')"
+    MOVIE_YEAR="$(echo "$BASENAME" | grep -oE '(19|20)[0-9]{2}' | head -1 || true)"
+    MOVIE_TITLE="$(sanitize_name "$(echo "$BASENAME" | sed -E 's/[[:space:]\(]*(19|20)[0-9]{2}.*$//')")"
 
-      [[ "$SERIES_NAME" =~ $ANIME_SHOW_REGEX ]] \
-        && LIB_ROOT="$ANIME_DIR" \
-        || LIB_ROOT="$TV_DIR"
+    [[ "$MOVIE_TITLE" =~ $ANIME_MOVIE_REGEX ]] && LIB_ROOT="$ANIME_DIR" || LIB_ROOT="$MOVIES_DIR"
+    DEST_DIR="$LIB_ROOT/$MOVIE_TITLE"
+    mkdir -p "$DEST_DIR"
 
-      DEST_DIR="$LIB_ROOT/$SERIES_NAME/season$(printf "%02d" "$SEASON")"
-      mkdir -p "$DEST_DIR"
+    [[ -n "$MOVIE_YEAR" ]] \
+      && OUTPUT="$DEST_DIR/$MOVIE_TITLE ($MOVIE_YEAR).mp4" \
+      || OUTPUT="$DEST_DIR/$MOVIE_TITLE.mp4"
 
-      OUTPUT="$DEST_DIR/$SERIES_NAME S${SEASON}E${EPISODE}${EP_TITLE:+ $EP_TITLE}.mp4"
-
-    ########################################################
-    # MOVIES
-    ########################################################
-    else
-      MOVIE_YEAR=""
-      if echo "$BASENAME" | grep -qE '\([0-9]{4}\)$|[[:space:]][0-9]{4}$'; then
-        MOVIE_YEAR="$(echo "$BASENAME" | sed -E 's/.*[[:space:]\(]([0-9]{4})\)?$/\1/')"
-      fi
-
-      MOVIE_TITLE="$(echo "$BASENAME" | sed -E 's/[[:space:]\(]*[0-9]{4}\)?$//')"
-      MOVIE_TITLE="$(sanitize_name "$MOVIE_TITLE")"
-
-      [[ "$MOVIE_TITLE" =~ $ANIME_MOVIE_REGEX ]] \
-        && LIB_ROOT="$ANIME_DIR" \
-        || LIB_ROOT="$MOVIES_DIR"
-
-      DEST_DIR="$LIB_ROOT/$MOVIE_TITLE"
-      mkdir -p "$DEST_DIR"
-
-      if [[ -n "$MOVIE_YEAR" ]]; then
-        OUTPUT="$DEST_DIR/$MOVIE_TITLE $MOVIE_YEAR.mp4"
-      else
-        OUTPUT="$DEST_DIR/$MOVIE_TITLE.mp4"
-      fi
-    fi
-
-    if [[ -f "$OUTPUT" && -s "$OUTPUT" ]]; then
-      echo "SKIP | DEST exists: $OUTPUT" >> "$INGEST_LOG"
-      continue
-    fi
-
-    echo "INGEST | SRC='$FILE' | DEST='$OUTPUT' | TAG=$TAG" >> "$INGEST_LOG"
-    echo "Encoding [$TAG]: $FILE"
-
+    [[ -f "$OUTPUT" && -s "$OUTPUT" ]] && continue
     TMP="${OUTPUT}.partial"
 
-    HandBrakeCLI \
-      -i "$FILE" \
-      -o "$TMP" \
-      --preset="$PRESET" \
-      --format av_mp4 \
-      --optimize
+    if [[ "$TAG" == "4K" ]]; then
+      CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 )
+    else
+      CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize )
+    fi
 
+    echo "RUNNING HANDBRAKE COMMAND:"
+    echo " ${CMD[*]}"
+    echo "RUNNING | ${CMD[*]}" >> "$INGEST_LOG"
+
+    "${CMD[@]}"
     mv "$TMP" "$OUTPUT"
   done
 }
 
 encode_dir "$RAW_DIR"
 for d in "$RAW_DIR"/*; do
-  [[ -d "$d" ]] || continue
-  encode_dir "$d"
+  [[ -d "$d" ]] && encode_dir "$d"
 done
 
 ############################################################
 # ================= STEP 4: CLEANUP ========================
 ############################################################
 
-if [[ "$KEEP_RAW" -eq 0 ]]; then
-  rm -rf "$RAW_DIR"
-fi
-
+[[ "$KEEP_RAW" -eq 0 ]] && rm -rf "$RAW_DIR"
 echo "Ingest complete."
 
