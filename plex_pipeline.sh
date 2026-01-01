@@ -5,7 +5,7 @@ set -euo pipefail
 # ======================= CONFIG ===========================
 ############################################################
 
-INPUT_DIR="${1:-/Users/jhudson/Downloads/thunder3}"
+INPUT_DIR="${1:-/Users/jhudson/Downloads}"
 RAW_DIR_NAME="handbrake_raw"
 
 PLEX_ROOT="/Volumes/Media"
@@ -15,8 +15,11 @@ ANIME_DIR="$PLEX_ROOT/Anime"
 
 PRESET_1080P="HQ 1080p30 Surround"
 FOUR_K_MIN_WIDTH=3000
-
 KEEP_RAW=0
+
+# If a zip dest dir exists but was not successfully marked as unzipped,
+# should we delete it and retry clean?
+UNZIP_RETRY_CLEAN=1
 
 ANIME_SHOW_REGEX="Naruto|Bleach|One Piece|Attack on Titan"
 ANIME_MOVIE_REGEX="Ghibli|Spirited Away|Your Name|Suzume"
@@ -30,7 +33,6 @@ LOG_FILE="$LOG_DIR/plex_ingest.log"
 INGEST_LOG="$LOG_DIR/ingest_manifest.log"
 
 mkdir -p "$LOG_DIR"
-
 exec > >(gawk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -a "$LOG_FILE") 2>&1
 echo "===== Ingest run $(date '+%Y-%m-%d %H:%M:%S') =====" >> "$INGEST_LOG"
 
@@ -38,11 +40,8 @@ echo "===== Ingest run $(date '+%Y-%m-%d %H:%M:%S') =====" >> "$INGEST_LOG"
 # ==================== PRE-FLIGHT ==========================
 ############################################################
 
-for cmd in unzip ffprobe HandBrakeCLI sed gawk; do
-  command -v "$cmd" >/dev/null || {
-    echo "Missing dependency: $cmd"
-    exit 1
-  }
+for cmd in unzip ffprobe HandBrakeCLI sed gawk find sort dirname; do
+  command -v "$cmd" >/dev/null || { echo "Missing dependency: $cmd"; exit 1; }
 done
 
 RAW_DIR="$INPUT_DIR/$RAW_DIR_NAME"
@@ -51,8 +50,8 @@ RAW_DIR="$INPUT_DIR/$RAW_DIR_NAME"
 # ====================== HELPERS ===========================
 ############################################################
 
-# Outputs: WIDTH HEIGHT
 detect_resolution() {
+  [[ -f "${1:-}" ]] || { echo "0 0"; return; }
   ffprobe -v error \
     -select_streams v:0 \
     -show_entries stream=width,height \
@@ -60,41 +59,36 @@ detect_resolution() {
 }
 
 sanitize_name() {
-  echo "$1" | sed \
-    -e 's/\./ /g' \
-    -e 's/_/ /g' \
-    -e 's/[[:space:]]\+/ /g' \
-    -e 's/^ //;s/ $//'
+  echo "$1" | sed -E 's/[._]/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+trim_dashes() {
+  echo "$1" | sed -E 's/^[[:space:]-]+//; s/[[:space:]-]+$//'
 }
 
 ############################################################
-# ============== MKV CLEANUP (YEAR-SAFE) ==================
+# ============== CLEANUP FUNCTIONS (SPLIT) ================
 ############################################################
 
-clean_mkv_name() {
-  local file="$1"
-  local dir base name norm title year cleaned
+# MOVIES: keep year if present
+clean_mkv_name_movie() {
+  local file="$1" dir base name norm year title cleaned
 
   dir="$(dirname "$file")"
   base="$(basename "$file")"
   name="${base%.mkv}"
 
-  # Normalize separators
   norm="$(echo "$name" | sed 's/[._]/ /g')"
+  year="$(echo "$norm" | grep -oE '(19|20)[0-9]{2}' | head -1 || true)"
 
-  # Extract year FIRST
-  year="$(echo "$norm" | grep -oE '(19|20)[0-9]{2}' | head -n1 || true)"
-
-  # Remove everything from year onward
   if [[ -n "$year" ]]; then
     title="$(echo "$norm" | sed -E "s/[[:space:]]*\(?$year\)?.*//")"
   else
     title="$norm"
   fi
 
-  # Remove common junk
-  title="$(echo "$title" | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265).*//Ig')"
-
+  # remove common junk (before final formatting)
+  title="$(echo "$title" | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|DDP[0-9.]+|AAC[0-9.]+).*//Ig')"
   title="$(sanitize_name "$title")"
 
   if [[ -n "$year" ]]; then
@@ -109,7 +103,26 @@ clean_mkv_name() {
   fi
 }
 
+# TV: NEVER keep year, NEVER keep parentheses
+clean_mkv_name_tv() {
+  local file="$1" dir base name cleaned
 
+  dir="$(dirname "$file")"
+  base="$(basename "$file")"
+  name="${base%.mkv}"
+
+  cleaned="$(echo "$name" \
+    | sed -E 's/\([[:space:]]*(19|20)[0-9]{2}[[:space:]]*\)//g' \
+    | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|DDP[0-9.]+|AAC[0-9.]+).*//Ig' \
+    | sed -E 's/[()]+//g')"
+
+  cleaned="$(sanitize_name "$cleaned").mkv"
+
+  if [[ "$base" != "$cleaned" ]]; then
+    echo "RENAME | $base -> $cleaned" >> "$INGEST_LOG"
+    mv "$file" "$dir/$cleaned"
+  fi
+}
 
 ############################################################
 # ================= STEP 0: STAGING ========================
@@ -120,74 +133,128 @@ mkdir -p "$RAW_DIR"
 
 shopt -s nullglob
 for f in "$INPUT_DIR"/*.mkv "$INPUT_DIR"/*.zip; do
-  mv "$f" "$RAW_DIR/"
+  mv "$f" "$RAW_DIR/" 2>/dev/null || true
 done
 shopt -u nullglob
 
 ############################################################
-# ================= STEP 1: UNZIP ==========================
+# ================= STEP 1: UNZIP (RESTARTABLE) ============
 ############################################################
 
+# v1-style extraction layout: RAW_DIR/<zipname>/...
+# v2 fix: only mark success if unzip actually succeeds (exit 0 or 1).
 for ZIP in "$RAW_DIR"/*.zip; do
-  [[ -e "$ZIP" ]] || continue
+  [[ -f "$ZIP" ]] || continue
+
   DEST_DIR="$RAW_DIR/$(basename "$ZIP" .zip)"
-  [[ -d "$DEST_DIR" ]] && continue
+  MARKER="$DEST_DIR/.unzipped_ok"
+
+  # If already successfully unzipped, never unzip again
+  if [[ -f "$MARKER" ]]; then
+    echo "SKIP UNZIP (already ok): $(basename "$ZIP")"
+    continue
+  fi
+
+  # If this folder already has MKVs, treat it as extracted (helps migrate from older runs)
+  if [[ -d "$DEST_DIR" ]] && find "$DEST_DIR" -maxdepth 1 -type f -name '*.mkv' -print -quit | grep -q .; then
+    echo "SKIP UNZIP (mkv already present): $(basename "$ZIP")"
+    touch "$MARKER"
+    continue
+  fi
+
+  # If folder exists but no marker, assume previous unzip was incomplete and retry clean
+  if [[ -d "$DEST_DIR" && "$UNZIP_RETRY_CLEAN" -eq 1 ]]; then
+    echo "RETRY UNZIP (clean): removing incomplete $DEST_DIR"
+    rm -rf "$DEST_DIR"
+  fi
+
   mkdir -p "$DEST_DIR"
-  unzip -oq "$ZIP" -d "$DEST_DIR" || true
+  echo "UNZIP | $(basename "$ZIP") -> $DEST_DIR"
+  echo "UNZIP | $(basename "$ZIP") -> $DEST_DIR" >> "$INGEST_LOG"
+
+  # Important: </dev/null prevents interactive prompts (disk full, etc.)
+  # unzip exit codes: 0=ok, 1=warnings, >1=error
+  set +e
+  unzip -oq "$ZIP" -d "$DEST_DIR" </dev/null
+  rc=$?
+  set -e
+
+  if [[ "$rc" -le 1 ]]; then
+    touch "$MARKER"
+  else
+    echo "WARNING: unzip failed for $(basename "$ZIP") (exit=$rc). Will retry next run."
+    echo "WARNING: unzip failed for $(basename "$ZIP") (exit=$rc)" >> "$INGEST_LOG"
+    # leave NO marker so it retries later
+  fi
 done
 
 ############################################################
 # ================= STEP 2: RENAME =========================
 ############################################################
 
-rename_in_dir() {
-  local dir="$1"
-  for f in "$dir"/*.mkv; do
-    [[ -e "$f" ]] || continue
-    clean_mkv_name "$f"
-  done
-}
-
-rename_in_dir "$RAW_DIR"
-for d in "$RAW_DIR"/*; do
-  [[ -d "$d" ]] && rename_in_dir "$d"
-done
+# Rename every MKV anywhere under RAW_DIR (so reruns “start over” cleanly)
+while IFS= read -r -d '' f; do
+  base="$(basename "$f")"
+  if [[ "$base" =~ S[0-9]{2}E[0-9]{2} ]]; then
+    clean_mkv_name_tv "$f"
+  else
+    clean_mkv_name_movie "$f"
+  fi
+done < <(find "$RAW_DIR" -type f -name '*.mkv' -print0)
 
 ############################################################
 # ================= STEP 3: HANDBRAKE ======================
 ############################################################
 
 encode_dir() {
-  local SRC_DIR="$1"
-
-  for FILE in "$SRC_DIR"/*.mkv; do
-    [[ -e "$FILE" ]] || continue
+  local SRC="$1"
+  shopt -s nullglob
+  for FILE in "$SRC"/*.mkv; do
+    [[ -f "$FILE" ]] || continue
 
     BASENAME="$(basename "$FILE" .mkv)"
 
     read -r WIDTH HEIGHT < <(detect_resolution "$FILE")
-    echo "Detected resolution: ${WIDTH}x${HEIGHT}"
-
-    [[ "$WIDTH" =~ ^[0-9]+$ ]] || {
-      echo "ERROR: Invalid width '$WIDTH'"
-      exit 1
-    }
-
+    [[ "$WIDTH" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid width '$WIDTH' for $FILE"; exit 1; }
     (( WIDTH >= FOUR_K_MIN_WIDTH )) && TAG="4K" || TAG="1080p"
 
-    MOVIE_YEAR="$(echo "$BASENAME" | grep -oE '(19|20)[0-9]{2}' | head -1 || true)"
-    MOVIE_TITLE="$(sanitize_name "$(echo "$BASENAME" | sed -E 's/[[:space:]\(]*(19|20)[0-9]{2}.*$//')")"
+    if [[ "$BASENAME" =~ S([0-9]{2})E([0-9]{2}) ]]; then
+      SEASON="${BASH_REMATCH[1]}"
+      EPISODE="${BASH_REMATCH[2]}"
 
-    [[ "$MOVIE_TITLE" =~ $ANIME_MOVIE_REGEX ]] && LIB_ROOT="$ANIME_DIR" || LIB_ROOT="$MOVIES_DIR"
-    DEST_DIR="$LIB_ROOT/$MOVIE_TITLE"
-    mkdir -p "$DEST_DIR"
+      SERIES="$(trim_dashes "$(sanitize_name "${BASENAME%%S${SEASON}E${EPISODE}*}")")"
+      TITLE="$(trim_dashes "$(sanitize_name "${BASENAME#*S${SEASON}E${EPISODE}}" | sed 's/[()]+//g')")"
 
-    [[ -n "$MOVIE_YEAR" ]] \
-      && OUTPUT="$DEST_DIR/$MOVIE_TITLE ($MOVIE_YEAR).mp4" \
-      || OUTPUT="$DEST_DIR/$MOVIE_TITLE.mp4"
+      # Anime TV routing
+      if [[ "$SERIES" =~ $ANIME_SHOW_REGEX ]]; then
+        TV_ROOT="$ANIME_DIR"
+      else
+        TV_ROOT="$TV_DIR"
+      fi
 
-    [[ -f "$OUTPUT" && -s "$OUTPUT" ]] && continue
-    TMP="${OUTPUT}.partial"
+      DEST="$TV_ROOT/$SERIES/Season $(printf "%02d" "$SEASON")"
+      mkdir -p "$DEST"
+      OUT="$DEST/$SERIES - S${SEASON}E${EPISODE}${TITLE:+ - $TITLE}.mp4"
+    else
+      YEAR="$(echo "$BASENAME" | grep -oE '(19|20)[0-9]{2}' | head -1 || true)"
+      TITLE="$(sanitize_name "$(echo "$BASENAME" | sed -E 's/[[:space:]\(]*(19|20)[0-9]{2}.*$//')")"
+
+      # Anime movie routing
+      if [[ "$TITLE" =~ $ANIME_MOVIE_REGEX ]]; then
+        MOV_ROOT="$ANIME_DIR"
+      else
+        MOV_ROOT="$MOVIES_DIR"
+      fi
+
+      DEST="$MOV_ROOT/$TITLE"
+      mkdir -p "$DEST"
+      OUT="$DEST/$TITLE${YEAR:+ ($YEAR)}.mp4"
+    fi
+
+    [[ -f "$OUT" && -s "$OUT" ]] && { echo "SKIP (exists): $OUT"; continue; }
+
+    TMP="$OUT.partial"
+    rm -f "$TMP" 2>/dev/null || true
 
     if [[ "$TAG" == "4K" ]]; then
       CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 )
@@ -195,24 +262,30 @@ encode_dir() {
       CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize )
     fi
 
-    echo "RUNNING HANDBRAKE COMMAND:"
-    echo " ${CMD[*]}"
+    echo "RUNNING | ${CMD[*]}"
     echo "RUNNING | ${CMD[*]}" >> "$INGEST_LOG"
 
     "${CMD[@]}"
-    mv "$TMP" "$OUTPUT"
+    mv "$TMP" "$OUT"
   done
+  shopt -u nullglob
 }
 
-encode_dir "$RAW_DIR"
-for d in "$RAW_DIR"/*; do
-  [[ -d "$d" ]] && encode_dir "$d"
-done
+# Encode each directory containing MKVs exactly once (handles nested unzip layouts too)
+find "$RAW_DIR" -type f -name '*.mkv' -print0 \
+  | while IFS= read -r -d '' f; do dirname "$f"; done \
+  | sort -u \
+  | while IFS= read -r dir; do
+      echo "ENCODE DIR: $dir"
+      encode_dir "$dir"
+    done
 
 ############################################################
 # ================= STEP 4: CLEANUP ========================
 ############################################################
 
-[[ "$KEEP_RAW" -eq 0 ]] && rm -rf "$RAW_DIR"
+if [[ "$KEEP_RAW" -eq 0 ]]; then
+  rm -rf "$RAW_DIR"
+fi
 echo "Ingest complete."
 
