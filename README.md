@@ -260,6 +260,51 @@ Paste the following:
 </plist>
 ```
 
+Safe to run, it parses the .media.state.json and tells you when the next email is going to send out.
+
+```
+(base) jhudson@Mac-Studio plex % python3 - <<'PY'
+import json, os, time
+from datetime import datetime
+STATE=os.path.expanduser("~/.media_state.json")
+d=json.load(open(STATE))
+now=datetime.now()
+SEND_WEEKDAY=4
+SEND_HOUR=13
+WEEK_SECONDS=7*24*60*60
+
+last=d.get("last_email_ts")
+pending=len(d.get("pending",[]))
+is_send_day = now.weekday() == SEND_WEEKDAY
+is_after_hour = now.hour >= SEND_HOUR
+week_elapsed = (last is None) or (time.time() - last >= WEEK_SECONDS)
+
+print("now:", now)
+print("pending:", pending)
+print("is_send_day:", is_send_day, "is_after_hour:", is_after_hour, "week_elapsed:", week_elapsed)
+if last:
+    last_dt=datetime.fromtimestamp(last)
+    remaining=max(0, WEEK_SECONDS - (time.time()-last))
+    print("last_email:", last_dt)
+    print("seconds_remaining_until_week_elapsed:", int(remaining))
+PY
+
+now: 2026-01-02 15:30:14.916842
+pending: 39
+is_send_day: True is_after_hour: True week_elapsed: False
+last_email: 2025-12-26 23:08:59.830999
+seconds_remaining_until_week_elapsed: 27524
+```
+Output looks like this:
+
+```
+now: 2026-01-02 15:30:14.916842
+pending: 39
+is_send_day: True is_after_hour: True week_elapsed: False
+last_email: 2025-12-26 23:08:59.830999
+seconds_remaining_until_week_elapsed: 27524
+```
+
 ---
 
 ### Load the Job

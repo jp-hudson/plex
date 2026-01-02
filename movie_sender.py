@@ -27,14 +27,24 @@ SMTP_PORT = 587
 SMTP_USER = "hudson.plex.media@gmail.com"
 
 EMAIL_FROM = "Hudson Plex Media <hudson.plex.media@gmail.com>"
+
+# Actual recipients (will NOT appear in email headers)
 EMAIL_TO = [
     "jhudson2083@gmail.com",
 ]
 
+# What shows in the visible "To:" header (safe single address)
+# (People will NOT see the full recipient list.)
+EMAIL_VISIBLE_TO = "Hudson Plex Media <hudson.plex.media@gmail.com>"
+
+# Optional: custom message file (edit when you want a one-off note)
+# - If missing/blank -> no message included
+# - If not modified since last send -> not included (prevents accidental repeats)
+CUSTOM_MESSAGE_FILE = os.path.expanduser("~/.plex_custom_message.txt")
+
 # ---- Scheduling ----
 SEND_WEEKDAY = 4        # Friday (Mon=0)
 SEND_HOUR = 13          # 1 PM
-WEEK_SECONDS = 7 * 24 * 60 * 60
 
 PREVIEW_EMAIL = False   # 🔧 True = preview only, no purge, no timestamp
 
@@ -184,7 +194,7 @@ def scan_media():
 
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return {"items": [], "pending": [], "last_email_ts": None}
+        return {"items": [], "pending": [], "last_email_ts": None, "last_custom_msg_mtime": None}
 
     with open(STATE_FILE) as f:
         d = json.load(f)
@@ -192,6 +202,7 @@ def load_state():
     d.setdefault("items", [])
     d.setdefault("pending", [])
     d.setdefault("last_email_ts", None)
+    d.setdefault("last_custom_msg_mtime", None)
     return d
 
 
@@ -200,9 +211,55 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
+# ---------- Scheduling helper ----------
+# "Once per week after 1PM on Friday" (not "exactly 7 days since last send")
+
+def most_recent_friday_window_start(now: datetime) -> datetime:
+    days_since_friday = (now.weekday() - SEND_WEEKDAY) % 7
+    window = (now - timedelta(days=days_since_friday)).replace(
+        hour=SEND_HOUR, minute=0, second=0, microsecond=0
+    )
+    if now < window:
+        window -= timedelta(days=7)
+    return window
+
+
+# ---------- Custom message helper ----------
+
+def load_custom_message_if_fresh(state):
+    """
+    Returns (message_text_or_None, file_mtime_or_None)
+
+    - None if file missing/blank.
+    - None if file mtime is not newer than last_custom_msg_mtime (prevents repeats).
+    """
+    path = CUSTOM_MESSAGE_FILE
+    try:
+        if not os.path.exists(path):
+            return (None, None)
+
+        mtime = os.path.getmtime(path)
+        last_mtime = state.get("last_custom_msg_mtime")
+
+        # If we've already used this exact file version, do not include again
+        if last_mtime is not None and mtime <= float(last_mtime):
+            return (None, mtime)
+
+        with open(path, "r", encoding="utf-8") as f:
+            msg = f.read().strip()
+
+        if not msg:
+            return (None, mtime)
+
+        return (msg, mtime)
+    except Exception:
+        # Fail safe: if anything goes wrong, do not include custom message
+        return (None, None)
+
+
 # ---------- Email ----------
 
-def send_email(pending, recipients):
+def send_email(pending, recipients, custom_message=None):
     grouped = defaultdict(list)
     for i in pending:
         grouped[i["type"]].append(i)
@@ -221,10 +278,21 @@ def send_email(pending, recipients):
         "",
         "Here’s your weekly John Plex Media digest 🎬",
         "",
+    ]
+
+    # Optional custom note (only included when provided)
+    if custom_message:
+        text.extend([
+            "📣 Note from Hudson Plex Media:",
+            custom_message,
+            "",
+        ])
+
+    text.extend([
         f"New media added ({start:%b %d} – {end:%b %d})",
         "Summary: " + ", ".join(f"{v} {k}" for k, v in counts.items()),
         "",
-    ]
+    ])
 
     if surprise:
         rt = rotten_tomatoes_score(surprise["name"])
@@ -265,13 +333,19 @@ def send_email(pending, recipients):
     msg = MIMEText("\n".join(text))
     msg["Subject"] = "🎬 John Plex Weekly Digest"
     msg["From"] = EMAIL_FROM
-    msg["To"] = ", ".join(recipients)
+
+    # IMPORTANT: hide recipient list by not putting it in headers
+    msg["To"] = EMAIL_VISIBLE_TO
+    # Do NOT set msg["Bcc"] (not needed, and you said you don't want it)
+
+    # SMTP envelope recipients (actual delivery list)
+    envelope_recipients = list(dict.fromkeys(recipients))
 
     pw = get_smtp_password()
     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as s:
         s.starttls()
         s.login(SMTP_USER, pw)
-        s.send_message(msg, to_addrs=recipients)
+        s.send_message(msg, to_addrs=envelope_recipients)
 
 
 # ---------- Main ----------
@@ -280,6 +354,7 @@ def main():
     state = load_state()
     current = scan_media()
 
+    # Initial load: populate items only, do not email
     if not state["items"] and not state["pending"] and state["last_email_ts"] is None:
         state["items"] = current
         save_state(state)
@@ -297,18 +372,41 @@ def main():
     now = datetime.now()
     is_send_day = now.weekday() == SEND_WEEKDAY
     is_after_hour = now.hour >= SEND_HOUR
-    week_elapsed = (
-        state["last_email_ts"] is None or
-        time.time() - state["last_email_ts"] >= WEEK_SECONDS
+
+    window_start = most_recent_friday_window_start(now)
+    already_sent_this_window = (
+        state["last_email_ts"] is not None and
+        datetime.fromtimestamp(state["last_email_ts"]) >= window_start
     )
 
-    if state["pending"] and (PREVIEW_EMAIL or (is_send_day and is_after_hour and week_elapsed)):
+    should_send = state["pending"] and (
+        PREVIEW_EMAIL or (is_send_day and is_after_hour and not already_sent_this_window)
+    )
+
+    # Load custom message (only included if changed since last send)
+    custom_message, custom_mtime = load_custom_message_if_fresh(state)
+
+    # Decision log (goes to stdout; launchd will capture it if logs are configured)
+    print(
+        f"[{now}] pending={len(state['pending'])} "
+        f"is_send_day={is_send_day} is_after_hour={is_after_hour} "
+        f"window_start={window_start} last_email_ts={state['last_email_ts']} "
+        f"already_sent_this_window={already_sent_this_window} preview={PREVIEW_EMAIL} "
+        f"custom_msg_included={'yes' if custom_message else 'no'}",
+        flush=True
+    )
+
+    if should_send:
         if PREVIEW_EMAIL:
-            send_email(state["pending"], ["jhudson2083@gmail.com"])
+            send_email(state["pending"], ["jhudson2083@gmail.com"], custom_message=custom_message)
         else:
-            send_email(state["pending"], EMAIL_TO)
+            send_email(state["pending"], EMAIL_TO, custom_message=custom_message)
             state["pending"] = []
             state["last_email_ts"] = time.time()
+
+            # Only record custom message usage when we actually sent a real email
+            if custom_mtime is not None and custom_message:
+                state["last_custom_msg_mtime"] = float(custom_mtime)
 
     state["items"] = current
     save_state(state)

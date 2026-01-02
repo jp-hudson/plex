@@ -40,7 +40,7 @@ echo "===== Ingest run $(date '+%Y-%m-%d %H:%M:%S') =====" >> "$INGEST_LOG"
 # ==================== PRE-FLIGHT ==========================
 ############################################################
 
-for cmd in unzip ffprobe HandBrakeCLI sed gawk find sort dirname; do
+for cmd in unzip ffprobe HandBrakeCLI sed gawk find sort dirname python3; do
   command -v "$cmd" >/dev/null || { echo "Missing dependency: $cmd"; exit 1; }
 done
 
@@ -66,6 +66,54 @@ trim_dashes() {
   echo "$1" | sed -E 's/^[[:space:]-]+//; s/[[:space:]-]+$//'
 }
 
+# Title-case ONLY if the string has no uppercase letters already
+# (so we don't mess up iCarly, Se7en, WALL·E, etc.)
+maybe_title_case() {
+  local s="$1"
+
+  # If there's already any uppercase, assume it's intentional
+  if [[ "$s" =~ [A-Z] ]]; then
+    echo "$s"
+    return
+  fi
+
+  /usr/bin/python3 - "$s" <<'PY'
+import re, sys
+s = sys.argv[1].strip()
+if not s:
+    print("")
+    raise SystemExit
+
+small = {"a","an","and","as","at","but","by","for","from","in","of","on","or","the","to","via","vs","with"}
+
+def cap_token(tok: str) -> str:
+    parts = tok.split('-')
+    out = []
+    for p in parts:
+        if not p:
+            out.append(p)
+            continue
+        if re.fullmatch(r'[ivxlcdm]+', p):
+            out.append(p.upper())
+        elif re.search(r'\d', p):
+            out.append(p)
+        else:
+            out.append(p[:1].upper() + p[1:].lower())
+    return "-".join(out)
+
+words = s.split()
+res = []
+n = len(words)
+for i, w in enumerate(words):
+    lw = w.lower()
+    if i not in (0, n-1) and lw in small:
+        res.append(lw)
+    else:
+        res.append(cap_token(w))
+print(" ".join(res))
+PY
+}
+
 ############################################################
 # ============== CLEANUP FUNCTIONS (SPLIT) ================
 ############################################################
@@ -89,7 +137,7 @@ clean_mkv_name_movie() {
 
   # remove common junk (before final formatting)
   title="$(echo "$title" | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|DDP[0-9.]+|AAC[0-9.]+).*//Ig')"
-  title="$(sanitize_name "$title")"
+  title="$(maybe_title_case "$(sanitize_name "$title")")"
 
   if [[ -n "$year" ]]; then
     cleaned="$title ($year).mkv"
@@ -116,7 +164,7 @@ clean_mkv_name_tv() {
     | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|DDP[0-9.]+|AAC[0-9.]+).*//Ig' \
     | sed -E 's/[()]+//g')"
 
-  cleaned="$(sanitize_name "$cleaned").mkv"
+  cleaned="$(maybe_title_case "$(sanitize_name "$cleaned")").mkv"
 
   if [[ "$base" != "$cleaned" ]]; then
     echo "RENAME | $base -> $cleaned" >> "$INGEST_LOG"
@@ -222,8 +270,8 @@ encode_dir() {
       SEASON="${BASH_REMATCH[1]}"
       EPISODE="${BASH_REMATCH[2]}"
 
-      SERIES="$(trim_dashes "$(sanitize_name "${BASENAME%%S${SEASON}E${EPISODE}*}")")"
-      TITLE="$(trim_dashes "$(sanitize_name "${BASENAME#*S${SEASON}E${EPISODE}}" | sed 's/[()]+//g')")"
+      SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME%%S${SEASON}E${EPISODE}*}")")")"
+      TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME#*S${SEASON}E${EPISODE}}" | sed 's/[()]+//g')")")"
 
       # Anime TV routing
       if [[ "$SERIES" =~ $ANIME_SHOW_REGEX ]]; then
@@ -238,7 +286,7 @@ encode_dir() {
       OUT="$DEST/$SERIES - S${SEASON}E${EPISODE}${TITLE:+ - $TITLE}.mp4"
     else
       YEAR="$(echo "$BASENAME" | grep -oE '(19|20)[0-9]{2}' | head -1 || true)"
-      TITLE="$(sanitize_name "$(echo "$BASENAME" | sed -E 's/[[:space:]\(]*(19|20)[0-9]{2}.*$//')")"
+      TITLE="$(maybe_title_case "$(sanitize_name "$(echo "$BASENAME" | sed -E 's/[[:space:]\(]*(19|20)[0-9]{2}.*$//')")")"
 
       # Anime movie routing
       if [[ "$TITLE" =~ $ANIME_MOVIE_REGEX ]]; then
