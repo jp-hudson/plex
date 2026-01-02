@@ -5,7 +5,7 @@ set -euo pipefail
 # ======================= CONFIG ===========================
 ############################################################
 
-INPUT_DIR="${1:-/Users/jhudson/Downloads}"
+INPUT_DIR="${1:-/Users/jhudson/PlexDrop/}"
 RAW_DIR_NAME="handbrake_raw"
 
 PLEX_ROOT="/Volumes/Media"
@@ -28,12 +28,12 @@ ANIME_MOVIE_REGEX="Ghibli|Spirited Away|Your Name|Suzume"
 # ======================== LOGGING =========================
 ############################################################
 
-LOG_DIR="$INPUT_DIR/logs"
+LOG_DIR="/Users/$USER/PlexDrop/logs"
 LOG_FILE="$LOG_DIR/plex_ingest.log"
 INGEST_LOG="$LOG_DIR/ingest_manifest.log"
 
 mkdir -p "$LOG_DIR"
-exec > >(gawk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee -a "$LOG_FILE") 2>&1
+exec > >(gawk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | /usr/bin/tee -a "$LOG_FILE") 2>&1
 echo "===== Ingest run $(date '+%Y-%m-%d %H:%M:%S') =====" >> "$INGEST_LOG"
 
 ############################################################
@@ -232,7 +232,8 @@ encode_dir() {
         TV_ROOT="$TV_DIR"
       fi
 
-      DEST="$TV_ROOT/$SERIES/Season $(printf "%02d" "$SEASON")"
+      DEST="$TV_ROOT/$SERIES/season$(printf "%02d" "$SEASON")"
+
       mkdir -p "$DEST"
       OUT="$DEST/$SERIES - S${SEASON}E${EPISODE}${TITLE:+ - $TITLE}.mp4"
     else
@@ -251,7 +252,11 @@ encode_dir() {
       OUT="$DEST/$TITLE${YEAR:+ ($YEAR)}.mp4"
     fi
 
-    [[ -f "$OUT" && -s "$OUT" ]] && { echo "SKIP (exists): $OUT"; continue; }
+    if [[ -f "$OUT" && -s "$OUT" ]]; then
+     echo "SKIP (exists): $OUT"
+     echo "SKIP (exists): $OUT" >> "$INGEST_LOG"
+     continue
+    fi
 
     TMP="$OUT.partial"
     rm -f "$TMP" 2>/dev/null || true
@@ -265,7 +270,7 @@ encode_dir() {
     echo "RUNNING | ${CMD[*]}"
     echo "RUNNING | ${CMD[*]}" >> "$INGEST_LOG"
 
-    "${CMD[@]}"
+    "${CMD[@]}" </dev/null
     mv "$TMP" "$OUT"
   done
   shopt -u nullglob
@@ -276,7 +281,8 @@ find "$RAW_DIR" -type f -name '*.mkv' -print0 \
   | while IFS= read -r -d '' f; do dirname "$f"; done \
   | sort -u \
   | while IFS= read -r dir; do
-      echo "ENCODE DIR: $dir"
+      echo "ENCODE DIR: $dir" </dev/null
+      echo "ENCODE DIR: $dir" >> "$INGEST_LOG"
       encode_dir "$dir"
     done
 

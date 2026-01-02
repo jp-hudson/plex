@@ -51,6 +51,83 @@ If all conditions are met, a summary email listing newly added media is sent to 
 
 ## `plex_pipeline.sh`
 
+Quick commands and info, this I setup on my mac M2 to launch as an app and run on schedule via launchctl I created a plist to do that:
+
+First I created the app using Automator.app. >> Search for `Run Shell Script` Inside the block put in 
+
+```
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+/Users/$USER/code/plex/plex_pipeline.sh /Users/$USER/PlexDrop
+```
+
+The export is necessary to have access to the homebrew commands for Handbrake, and Gawk.
+
+Next we create a launchctl job to run it at midnight
+
+vi ~/Library/LaunchAgents/com.jhudson.plexpipeline.plist
+
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.jhudson.plexpipeline</string>
+
+    <!-- Every day at 00:00 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+      <key>Hour</key>
+      <integer>0</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+
+    <!-- Launch hidden / background -->
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/bin/open</string>
+      <string>-gj</string>
+      <string>-a</string>
+      <string>/Applications/Plexpipeline.app</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jhudson/Library/Logs/plex_pipeline.launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jhudson/Library/Logs/plex_pipeline.launchd.err.log</string>
+
+    <!-- Optional: helps it run like a foreground job if needed -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>Nice</key>
+    <integer>0</integer>
+    <key>LowPriorityIO</key>
+    <false/>
+  </dict>
+</plist>
+
+```
+### Setup your folders for the file zip / mkv file drop
+
+mkdir -p /Users/$USER/PlexDrop/logs
+mkdir -p /Users/$USER/PlexDrop/handbrake_raw
+
+### Initialize the launchctl command to run your plex command
+
+launchctl unload -w ~/Library/LaunchAgents/com.jhudson.plexpipeline.plist
+launchctl load -w ~/Library/LaunchAgents/com.jhudson.plexpipeline.plist
+launchctl kickstart -k gui/$(id -u)/com.jhudson.plexpipeline
+
+This launchctl runs at 12AM or midnight) the kickstart comman will launch one for you
+
+To see the launchtcl log files look at:
+
+tail -n 200 ~/Library/Logs/plex_pipeline.launchd.err.log
+tail -n 200 ~/Library/Logs/plex_pipeline.launchd.out.log
+
 This script handles **media ingestion and transcoding** for downloaded content.
 
 ### Supported Input Formats
