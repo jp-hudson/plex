@@ -217,6 +217,14 @@ tail ~/.media_scan.err
 
 ---
 
+## Send a custom message in the next email
+```
+vi ~/.plex_custom_message.txt
+```
+Put in your custom message and it will add it in the next email.
+
+It "should" not repeat send it if it has not changed since the previous week
+
 ## Scheduling with `launchctl` (macOS)
 
 The script is configured to run **hourly** using `launchctl`.
