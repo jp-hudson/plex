@@ -114,6 +114,12 @@ print(" ".join(res))
 PY
 }
 
+# Shared "junk" stripper for titles (works for both MKV and MP4 naming)
+strip_release_junk() {
+  # NOTE: Keep this conservative; it only removes from the first matched token onward.
+  echo "$1" | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|HEVC|AV1|DDP[0-9. ]+|AAC[0-9. ]+|EAC3|AC3|TRUEHD|ATMOS|ESub|Eng).*//Ig'
+}
+
 ############################################################
 # ============== CLEANUP FUNCTIONS (SPLIT) ================
 ############################################################
@@ -135,8 +141,7 @@ clean_mkv_name_movie() {
     title="$norm"
   fi
 
-  # remove common junk (before final formatting)
-  title="$(echo "$title" | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|DDP[0-9.]+|AAC[0-9.]+).*//Ig')"
+  title="$(strip_release_junk "$title")"
   title="$(maybe_title_case "$(sanitize_name "$title")")"
 
   if [[ -n "$year" ]]; then
@@ -161,9 +166,9 @@ clean_mkv_name_tv() {
 
   cleaned="$(echo "$name" \
     | sed -E 's/\([[:space:]]*(19|20)[0-9]{2}[[:space:]]*\)//g' \
-    | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|DDP[0-9.]+|AAC[0-9.]+).*//Ig' \
     | sed -E 's/[()]+//g')"
 
+  cleaned="$(strip_release_junk "$cleaned")"
   cleaned="$(maybe_title_case "$(sanitize_name "$cleaned")").mkv"
 
   if [[ "$base" != "$cleaned" ]]; then
@@ -180,7 +185,7 @@ echo "Staging files into $RAW_DIR_NAME/"
 mkdir -p "$RAW_DIR"
 
 shopt -s nullglob
-for f in "$INPUT_DIR"/*.mkv "$INPUT_DIR"/*.zip; do
+for f in "$INPUT_DIR"/*.mkv "$INPUT_DIR"/*.mp4 "$INPUT_DIR"/*.zip; do
   mv "$f" "$RAW_DIR/" 2>/dev/null || true
 done
 shopt -u nullglob
@@ -237,7 +242,7 @@ for ZIP in "$RAW_DIR"/*.zip; do
 done
 
 ############################################################
-# ================= STEP 2: RENAME =========================
+# ================= STEP 2: RENAME MKVS ====================
 ############################################################
 
 # Rename every MKV anywhere under RAW_DIR (so reruns “start over” cleanly)
@@ -250,6 +255,89 @@ while IFS= read -r -d '' f; do
     clean_mkv_name_movie "$f"
   fi
 done < <(find "$RAW_DIR" -type f -name '*.mkv' -print0)
+
+############################################################
+# =========== STEP 2.5: INGEST PRE-ENCODED MP4 ============
+############################################################
+# If an MP4 shows up (either dropped directly, or inside a ZIP),
+# do NOT HandBrake it. Just normalize name, create Plex folder,
+# and move it into place.
+
+ingest_mp4_files() {
+  while IFS= read -r -d '' FILE; do
+    [[ -f "$FILE" ]] || continue
+
+    BASENAME="$(basename "$FILE" .mp4)"
+
+    # Normalize common TV patterns like:
+    #   "S01 E01", "S01-E01", "S01_E01", "S01.E01" -> "S01E01"
+    BASENAME_TV="$(echo "$BASENAME" | sed -E 's/S([0-9]{1,2})[[:space:]_.-]*E([0-9]{1,2})/S\1E\2/g')"
+
+    if [[ "$BASENAME_TV" =~ S([0-9]{1,2})E([0-9]{1,2}) ]]; then
+      SEASON_RAW="${BASH_REMATCH[1]}"
+      EPISODE_RAW="${BASH_REMATCH[2]}"
+
+      SEASON="$(printf "%02d" "$((10#$SEASON_RAW))")"
+      EPISODE="$(printf "%02d" "$((10#$EPISODE_RAW))")"
+
+      SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
+      TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}" | sed 's/[()]+//g')")")"
+
+      # Anime TV routing
+      if [[ "$SERIES" =~ $ANIME_SHOW_REGEX ]]; then
+        TV_ROOT="$ANIME_DIR"
+      else
+        TV_ROOT="$TV_DIR"
+      fi
+
+      DEST="$TV_ROOT/$SERIES/season${SEASON}"
+      mkdir -p "$DEST"
+
+      OUT="$DEST/$SERIES - S${SEASON}E${EPISODE}${TITLE:+ - $TITLE}.mp4"
+    else
+      # Movie MP4
+      norm="$(echo "$BASENAME" | sed 's/[._]/ /g')"
+      YEAR="$(echo "$norm" | grep -oE '(19|20)[0-9]{2}' | head -1 || true)"
+
+      if [[ -n "${YEAR:-}" ]]; then
+        TITLE_RAW="$(echo "$norm" | sed -E "s/[[:space:]]*\(?$YEAR\)?.*//")"
+      else
+        TITLE_RAW="$norm"
+      fi
+
+      TITLE_RAW="$(strip_release_junk "$TITLE_RAW")"
+      TITLE="$(maybe_title_case "$(sanitize_name "$TITLE_RAW")")"
+
+      # Anime movie routing
+      if [[ "$TITLE" =~ $ANIME_MOVIE_REGEX ]]; then
+        MOV_ROOT="$ANIME_DIR"
+      else
+        MOV_ROOT="$MOVIES_DIR"
+      fi
+
+      DEST="$MOV_ROOT/$TITLE"
+      mkdir -p "$DEST"
+      OUT="$DEST/$TITLE${YEAR:+ ($YEAR)}.mp4"
+    fi
+
+    if [[ -f "$OUT" && -s "$OUT" ]]; then
+      echo "SKIP (exists): $OUT"
+      echo "SKIP (exists): $OUT" >> "$INGEST_LOG"
+      continue
+    fi
+
+    echo "MOVE MP4 | $FILE -> $OUT"
+    echo "MOVE MP4 | $FILE -> $OUT" >> "$INGEST_LOG"
+
+    # Use a .partial move for consistency/atomicity
+    TMP="$OUT.partial"
+    rm -f "$TMP" 2>/dev/null || true
+    mv "$FILE" "$TMP"
+    mv "$TMP" "$OUT"
+  done < <(find "$RAW_DIR" -type f -name '*.mp4' ! -name '*.mp4.partial' -print0)
+}
+
+ingest_mp4_files
 
 ############################################################
 # ================= STEP 3: HANDBRAKE ======================
@@ -276,7 +364,6 @@ encode_dir() {
       EPISODE_RAW="${BASH_REMATCH[2]}"
 
       # Always output padded SxxExx + seasonxx folder
-
       SEASON="$(printf "%02d" "$((10#$SEASON_RAW))")"
       EPISODE="$(printf "%02d" "$((10#$EPISODE_RAW))")"
 
