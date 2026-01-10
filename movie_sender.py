@@ -54,6 +54,14 @@ EMERGENCY_QUOTES = [
     "“Make it work, then make it right.”",
 ]
 
+# ---- Safety rails ----
+MAX_PENDING_TO_SEND = 200                 # never send more than this per email
+SUSPICIOUS_PENDING_THRESHOLD = 600        # if pending exceeds this, refuse to send unless overridden
+ALLOW_BULK_SEND = False                   # set True only if you REALLY intend to send large batches
+
+# If scan suddenly shrinks by this factor vs the last baseline, assume a bad scan (unmounted volume, etc.)
+SCAN_SHRINK_FACTOR = 0.60                 # 60% of prior size (tune if desired)
+
 # =========================================
 # ---------- Keychain helpers ----------
 
@@ -207,8 +215,11 @@ def load_state():
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
+    # Atomic-ish save to avoid partial writes / corruption
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(state, f, indent=2)
+    os.replace(tmp, STATE_FILE)
 
 
 # ---------- Scheduling helper ----------
@@ -241,7 +252,6 @@ def load_custom_message_if_fresh(state):
         mtime = os.path.getmtime(path)
         last_mtime = state.get("last_custom_msg_mtime")
 
-        # If we've already used this exact file version, do not include again
         if last_mtime is not None and mtime <= float(last_mtime):
             return (None, mtime)
 
@@ -253,7 +263,6 @@ def load_custom_message_if_fresh(state):
 
         return (msg, mtime)
     except Exception:
-        # Fail safe: if anything goes wrong, do not include custom message
         return (None, None)
 
 
@@ -280,7 +289,6 @@ def send_email(pending, recipients, custom_message=None):
         "",
     ]
 
-    # Optional custom note (only included when provided)
     if custom_message:
         text.extend([
             "📣 Note from Hudson Plex Media:",
@@ -333,12 +341,8 @@ def send_email(pending, recipients, custom_message=None):
     msg = MIMEText("\n".join(text))
     msg["Subject"] = "🎬 John Plex Weekly Digest"
     msg["From"] = EMAIL_FROM
+    msg["To"] = EMAIL_VISIBLE_TO  # hide full list
 
-    # IMPORTANT: hide recipient list by not putting it in headers
-    msg["To"] = EMAIL_VISIBLE_TO
-    # Do NOT set msg["Bcc"] (not needed, and you said you don't want it)
-
-    # SMTP envelope recipients (actual delivery list)
     envelope_recipients = list(dict.fromkeys(recipients))
 
     pw = get_smtp_password()
@@ -352,6 +356,14 @@ def send_email(pending, recipients, custom_message=None):
 
 def main():
     state = load_state()
+
+    # Safety: if the media directories aren't mounted/available, do NOTHING (don't overwrite baseline)
+    missing_bases = [base for base in MEDIA_DIRS.values() if not os.path.isdir(base)]
+    if missing_bases:
+        now = datetime.now()
+        print(f"[{now}] MEDIA NOT AVAILABLE, skipping run. Missing: {missing_bases}", flush=True)
+        return
+
     current = scan_media()
 
     # Initial load: populate items only, do not email
@@ -360,12 +372,34 @@ def main():
         save_state(state)
         return
 
+    # Safety: if scan suddenly shrank a lot, assume a bad scan and do NOT overwrite baseline/state
+    prev_count = len(state.get("items", []))
+    curr_count = len(current)
+    if prev_count > 0 and curr_count < int(prev_count * SCAN_SHRINK_FACTOR):
+        now = datetime.now()
+        print(f"[{now}] SCAN LOOKS BAD (prev_items={prev_count}, current_items={curr_count}). "
+              f"Skipping run to avoid baseline wipe.", flush=True)
+        return
+
     seen = {i["path"] for i in state["items"]}
     pending_paths = {i["path"] for i in state["pending"]}
 
-    for i in current:
-        if i["path"] not in seen and i["path"] not in pending_paths:
-            state["pending"].append(i)
+    # Compute new candidates first (so we can detect explosions before polluting pending)
+    new_candidates = [i for i in current if i["path"] not in seen and i["path"] not in pending_paths]
+
+    # Safety: if we'd add a huge number of new items in one run, treat it as baseline mismatch and re-baseline
+    # without touching pending (prevents "everything is new" incidents).
+    if (not PREVIEW_EMAIL) and (not ALLOW_BULK_SEND) and len(new_candidates) > SUSPICIOUS_PENDING_THRESHOLD:
+        now = datetime.now()
+        print(f"[{now}] FAILSAFE: would_add_new={len(new_candidates)} looks suspicious. "
+              f"Re-baselining items to current scan and skipping send.", flush=True)
+        state["items"] = current
+        save_state(state)
+        return
+
+    # Normal case: add truly new items to pending
+    for i in new_candidates:
+        state["pending"].append(i)
 
     state["pending"].sort(key=season_sort_key)
 
@@ -383,12 +417,10 @@ def main():
         PREVIEW_EMAIL or (is_send_day and is_after_hour and not already_sent_this_window)
     )
 
-    # Load custom message (only included if changed since last send)
     custom_message, custom_mtime = load_custom_message_if_fresh(state)
 
-    # Decision log (goes to stdout; launchd will capture it if logs are configured)
     print(
-        f"[{now}] pending={len(state['pending'])} "
+        f"[{now}] pending={len(state['pending'])} new_added={len(new_candidates)} "
         f"is_send_day={is_send_day} is_after_hour={is_after_hour} "
         f"window_start={window_start} last_email_ts={state['last_email_ts']} "
         f"already_sent_this_window={already_sent_this_window} preview={PREVIEW_EMAIL} "
@@ -397,17 +429,27 @@ def main():
     )
 
     if should_send:
-        if PREVIEW_EMAIL:
-            send_email(state["pending"], ["jhudson2083@gmail.com"], custom_message=custom_message)
+        # Hard failsafe: refuse to send if pending is suspiciously huge (unless you override)
+        if (not PREVIEW_EMAIL) and (not ALLOW_BULK_SEND) and len(state["pending"]) > SUSPICIOUS_PENDING_THRESHOLD:
+            print(f"[{now}] FAILSAFE: pending={len(state['pending'])} exceeds "
+                  f"SUSPICIOUS_PENDING_THRESHOLD={SUSPICIOUS_PENDING_THRESHOLD}. Not sending.", flush=True)
         else:
-            send_email(state["pending"], EMAIL_TO, custom_message=custom_message)
-            state["pending"] = []
-            state["last_email_ts"] = time.time()
+            # Never send more than MAX_PENDING_TO_SEND in a single email
+            batch = state["pending"][:MAX_PENDING_TO_SEND]
 
-            # Only record custom message usage when we actually sent a real email
-            if custom_mtime is not None and custom_message:
-                state["last_custom_msg_mtime"] = float(custom_mtime)
+            if PREVIEW_EMAIL:
+                send_email(batch, ["jhudson2083@gmail.com"], custom_message=custom_message)
+            else:
+                send_email(batch, EMAIL_TO, custom_message=custom_message)
 
+                # Remove only what we sent; keep the rest for later
+                state["pending"] = state["pending"][MAX_PENDING_TO_SEND:]
+                state["last_email_ts"] = time.time()
+
+                if custom_mtime is not None and custom_message:
+                    state["last_custom_msg_mtime"] = float(custom_mtime)
+
+    # Update baseline (safe because we passed mount + shrink checks)
     state["items"] = current
     save_state(state)
 

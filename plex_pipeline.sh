@@ -241,9 +241,10 @@ done
 ############################################################
 
 # Rename every MKV anywhere under RAW_DIR (so reruns “start over” cleanly)
+# TV detection upgraded to also catch: S01 E01, S01-E01, S01_E01, S01.E01 (etc.)
 while IFS= read -r -d '' f; do
   base="$(basename "$f")"
-  if [[ "$base" =~ S[0-9]{2}E[0-9]{2} ]]; then
+  if [[ "$base" =~ S[0-9]{1,2}[[:space:]_.-]*E[0-9]{1,2} ]]; then
     clean_mkv_name_tv "$f"
   else
     clean_mkv_name_movie "$f"
@@ -266,12 +267,21 @@ encode_dir() {
     [[ "$WIDTH" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid width '$WIDTH' for $FILE"; exit 1; }
     (( WIDTH >= FOUR_K_MIN_WIDTH )) && TAG="4K" || TAG="1080p"
 
-    if [[ "$BASENAME" =~ S([0-9]{2})E([0-9]{2}) ]]; then
-      SEASON="${BASH_REMATCH[1]}"
-      EPISODE="${BASH_REMATCH[2]}"
+    # Normalize common TV patterns like:
+    #   "S01 E01", "S01-E01", "S01_E01", "S01.E01" -> "S01E01"
+    BASENAME_TV="$(echo "$BASENAME" | sed -E 's/S([0-9]{1,2})[[:space:]_.-]*E([0-9]{1,2})/S\1E\2/g')"
 
-      SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME%%S${SEASON}E${EPISODE}*}")")")"
-      TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME#*S${SEASON}E${EPISODE}}" | sed 's/[()]+//g')")")"
+    if [[ "$BASENAME_TV" =~ S([0-9]{1,2})E([0-9]{1,2}) ]]; then
+      SEASON_RAW="${BASH_REMATCH[1]}"
+      EPISODE_RAW="${BASH_REMATCH[2]}"
+
+      # Always output padded SxxExx + seasonxx folder
+
+      SEASON="$(printf "%02d" "$((10#$SEASON_RAW))")"
+      EPISODE="$(printf "%02d" "$((10#$EPISODE_RAW))")"
+
+      SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
+      TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}" | sed 's/[()]+//g')")")"
 
       # Anime TV routing
       if [[ "$SERIES" =~ $ANIME_SHOW_REGEX ]]; then
@@ -280,7 +290,7 @@ encode_dir() {
         TV_ROOT="$TV_DIR"
       fi
 
-      DEST="$TV_ROOT/$SERIES/season$(printf "%02d" "$SEASON")"
+      DEST="$TV_ROOT/$SERIES/season${SEASON}"
 
       mkdir -p "$DEST"
       OUT="$DEST/$SERIES - S${SEASON}E${EPISODE}${TITLE:+ - $TITLE}.mp4"
