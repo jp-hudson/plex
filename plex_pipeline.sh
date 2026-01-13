@@ -24,6 +24,18 @@ UNZIP_RETRY_CLEAN=1
 ANIME_SHOW_REGEX="Naruto|Bleach|One Piece|Attack on Titan"
 ANIME_MOVIE_REGEX="Ghibli|Spirited Away|Your Name|Suzume"
 
+# ---------------- AUDIO HANDOFF ----------------
+# Anything audio-only that shows up (loose files, folders, or audio-only ZIPs)
+# gets moved here so it won't be deleted with handbrake_raw cleanup.
+AUDIO_QUEUE="$INPUT_DIR/audiobook_queue"
+AUDIO_INCOMING_FILES="$AUDIO_QUEUE/_incoming_files"
+AUDIO_SOURCE_ZIPS="$AUDIO_QUEUE/_source_zips"
+AUDIO_FAILED_ZIPS="$AUDIO_QUEUE/_failed_zips"
+
+# If you want plex_pipeline.sh to invoke your audio pipeline automatically:
+RUN_AUDIO_PIPELINE=0
+AUDIO_PIPELINE="/Users/jhudson/code/plex/audio_pipeline.py"
+
 ############################################################
 # ======================== LOGGING =========================
 ############################################################
@@ -45,6 +57,8 @@ for cmd in unzip ffprobe HandBrakeCLI sed gawk find sort dirname python3; do
 done
 
 RAW_DIR="$INPUT_DIR/$RAW_DIR_NAME"
+
+mkdir -p "$AUDIO_QUEUE" "$AUDIO_INCOMING_FILES" "$AUDIO_SOURCE_ZIPS" "$AUDIO_FAILED_ZIPS"
 
 ############################################################
 # ====================== HELPERS ===========================
@@ -120,6 +134,28 @@ strip_release_junk() {
   echo "$1" | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|HEVC|AV1|DDP[0-9. ]+|AAC[0-9. ]+|EAC3|AC3|TRUEHD|ATMOS|ESub|Eng).*//Ig'
 }
 
+move_dir_unique() {
+  local src="$1"
+  local dst="$2"
+  if [[ -e "$dst" ]]; then
+    local ts
+    ts="$(date +%Y%m%d_%H%M%S)"
+    dst="${dst}_${ts}_$$"
+  fi
+  mv "$src" "$dst"
+  echo "$dst"
+}
+
+has_audio() {
+  local dir="$1"
+  find "$dir" -type f \( -iname '*.mp3' -o -iname '*.m4b' -o -iname '*.m4a' \) -print -quit | grep -q .
+}
+
+has_video() {
+  local dir="$1"
+  find "$dir" -type f \( -iname '*.mkv' -o -iname '*.mp4' \) -print -quit | grep -q .
+}
+
 ############################################################
 # ============== CLEANUP FUNCTIONS (SPLIT) ================
 ############################################################
@@ -178,12 +214,50 @@ clean_mkv_name_tv() {
 }
 
 ############################################################
+# ============ STEP -0.5: STAGE AUDIO DIRS ================
+############################################################
+# If someone drops a folder full of chapter MP3s/M4Bs into PlexDrop,
+# move that whole folder into AUDIO_QUEUE so cleanup won't touch it.
+
+stage_audio_dirs_from_input() {
+  # Only look at immediate subdirs of INPUT_DIR (not recursion)
+  # Skip known internal dirs.
+  find "$INPUT_DIR" -maxdepth 1 -type d -mindepth 1 -print0 \
+    | while IFS= read -r -d '' d; do
+        b="$(basename "$d")"
+        [[ "$b" == "$RAW_DIR_NAME" ]] && continue
+        [[ "$b" == "logs" ]] && continue
+        [[ "$b" == "$(basename "$AUDIO_QUEUE")" ]] && continue
+
+        # audio-only folder? move it
+        if has_audio "$d" && ! has_video "$d"; then
+          echo "AUDIO DIR DETECTED | moving to queue: $d"
+          echo "AUDIO DIR DETECTED | moving to queue: $d" >> "$INGEST_LOG"
+          move_dir_unique "$d" "$AUDIO_QUEUE/$b" >/dev/null
+        fi
+      done
+}
+
+stage_audio_dirs_from_input
+
+############################################################
 # ================= STEP 0: STAGING ========================
 ############################################################
 
 echo "Staging files into $RAW_DIR_NAME/"
 mkdir -p "$RAW_DIR"
 
+# Move loose audio files straight into AUDIO_QUEUE so RAW cleanup won't remove them
+shopt -s nullglob
+for f in "$INPUT_DIR"/*.mp3 "$INPUT_DIR"/*.m4b "$INPUT_DIR"/*.m4a; do
+  [[ -f "$f" ]] || continue
+  echo "AUDIO FILE DETECTED | moving to queue: $f"
+  echo "AUDIO FILE DETECTED | moving to queue: $f" >> "$INGEST_LOG"
+  mv "$f" "$AUDIO_INCOMING_FILES/" 2>/dev/null || true
+done
+shopt -u nullglob
+
+# Stage video inputs / zips into RAW_DIR
 shopt -s nullglob
 for f in "$INPUT_DIR"/*.mkv "$INPUT_DIR"/*.mp4 "$INPUT_DIR"/*.zip; do
   mv "$f" "$RAW_DIR/" 2>/dev/null || true
@@ -232,6 +306,30 @@ for ZIP in "$RAW_DIR"/*.zip; do
   rc=$?
   set -e
 
+  # NEW: If this ZIP produced audio-only content, move it to AUDIO_QUEUE immediately
+  if [[ -d "$DEST_DIR" ]] && has_audio "$DEST_DIR" && ! has_video "$DEST_DIR"; then
+    echo "AUDIO ZIP DETECTED | preserving extracted audio: $(basename "$ZIP")"
+    echo "AUDIO ZIP DETECTED | preserving extracted audio: $(basename "$ZIP")" >> "$INGEST_LOG"
+
+    moved_to="$(move_dir_unique "$DEST_DIR" "$AUDIO_QUEUE/$(basename "$DEST_DIR")")"
+    echo "AUDIO MOVED | $moved_to"
+    echo "AUDIO MOVED | $moved_to" >> "$INGEST_LOG"
+
+    if [[ "$rc" -le 1 ]]; then
+      echo "AUDIO ZIP OK/WARN | moving zip to: $AUDIO_SOURCE_ZIPS"
+      echo "AUDIO ZIP OK/WARN | moving zip to: $AUDIO_SOURCE_ZIPS" >> "$INGEST_LOG"
+      mv "$ZIP" "$AUDIO_SOURCE_ZIPS/" 2>/dev/null || true
+    else
+      echo "AUDIO ZIP UNZIP ERROR (exit=$rc) | moving zip to: $AUDIO_FAILED_ZIPS"
+      echo "AUDIO ZIP UNZIP ERROR (exit=$rc) | moving zip to: $AUDIO_FAILED_ZIPS" >> "$INGEST_LOG"
+      mv "$ZIP" "$AUDIO_FAILED_ZIPS/" 2>/dev/null || true
+    fi
+
+    # Do NOT touch the normal video marker logic for audio zips (we moved the whole dir out)
+    continue
+  fi
+
+  # Normal (video) behavior
   if [[ "$rc" -le 1 ]]; then
     touch "$MARKER"
   else
@@ -329,7 +427,6 @@ ingest_mp4_files() {
     echo "MOVE MP4 | $FILE -> $OUT"
     echo "MOVE MP4 | $FILE -> $OUT" >> "$INGEST_LOG"
 
-    # Use a .partial move for consistency/atomicity
     TMP="$OUT.partial"
     rm -f "$TMP" 2>/dev/null || true
     mv "$FILE" "$TMP"
@@ -363,7 +460,6 @@ encode_dir() {
       SEASON_RAW="${BASH_REMATCH[1]}"
       EPISODE_RAW="${BASH_REMATCH[2]}"
 
-      # Always output padded SxxExx + seasonxx folder
       SEASON="$(printf "%02d" "$((10#$SEASON_RAW))")"
       EPISODE="$(printf "%02d" "$((10#$EPISODE_RAW))")"
 
@@ -378,7 +474,6 @@ encode_dir() {
       fi
 
       DEST="$TV_ROOT/$SERIES/season${SEASON}"
-
       mkdir -p "$DEST"
       OUT="$DEST/$SERIES - S${SEASON}E${EPISODE}${TITLE:+ - $TITLE}.mp4"
     else
@@ -398,9 +493,9 @@ encode_dir() {
     fi
 
     if [[ -f "$OUT" && -s "$OUT" ]]; then
-     echo "SKIP (exists): $OUT"
-     echo "SKIP (exists): $OUT" >> "$INGEST_LOG"
-     continue
+      echo "SKIP (exists): $OUT"
+      echo "SKIP (exists): $OUT" >> "$INGEST_LOG"
+      continue
     fi
 
     TMP="$OUT.partial"
@@ -430,6 +525,28 @@ find "$RAW_DIR" -type f -name '*.mkv' -print0 \
       echo "ENCODE DIR: $dir" >> "$INGEST_LOG"
       encode_dir "$dir"
     done
+
+############################################################
+# ============ STEP 3.5: OPTIONAL AUDIO PIPELINE ===========
+############################################################
+
+if [[ "$RUN_AUDIO_PIPELINE" -eq 1 ]]; then
+  if [[ -f "$AUDIO_PIPELINE" ]]; then
+    echo "AUDIO PIPELINE | running: $AUDIO_PIPELINE $AUDIO_QUEUE"
+    echo "AUDIO PIPELINE | running: $AUDIO_PIPELINE $AUDIO_QUEUE" >> "$INGEST_LOG"
+    set +e
+    /usr/bin/python3 "$AUDIO_PIPELINE" "$AUDIO_QUEUE"
+    rc=$?
+    set -e
+    if [[ "$rc" -ne 0 ]]; then
+      echo "AUDIO PIPELINE | WARNING: exited non-zero ($rc). Leaving audio queue in place."
+      echo "AUDIO PIPELINE | WARNING: exited non-zero ($rc). Leaving audio queue in place." >> "$INGEST_LOG"
+    fi
+  else
+    echo "AUDIO PIPELINE | not found at $AUDIO_PIPELINE (skipping)"
+    echo "AUDIO PIPELINE | not found at $AUDIO_PIPELINE (skipping)" >> "$INGEST_LOG"
+  fi
+fi
 
 ############################################################
 # ================= STEP 4: CLEANUP ========================
