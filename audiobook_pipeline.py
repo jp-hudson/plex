@@ -20,6 +20,12 @@ DEFAULT_DEST = "/Volumes/Media/Audiobooks"
 
 AUDIO_EXTS = {".mp3", ".m4b", ".m4a"}
 
+# NEW: ebook formats that sometimes ride along with audiobook drops
+EBOOK_EXTS = {".mobi", ".epub"}
+
+# NEW: “book media” = audio + ebook files
+MEDIA_EXTS = set(AUDIO_EXTS) | set(EBOOK_EXTS)
+
 JUNK_PHRASES = [
     # IMPORTANT: longer phrases should win over shorter ones
     "mp3 split chapters",
@@ -67,6 +73,9 @@ JUNK_PHRASES = [
     "2160p",
     "10bit",
     "8bit",
+    # NEW: folder-name “format labels”
+    "epub",
+    "mobi",
 ]
 
 OPENLIB_TIMEOUT_SECS = 6
@@ -125,17 +134,11 @@ def strip_parens_year(s: str) -> Tuple[str, Optional[str]]:
     return s2, year
 
 def strip_junk_phrases(s: str) -> str:
-    # Remove longer phrases first so "mp3 split chapters" wins over "split chapters"
     for phrase in sorted(JUNK_PHRASES, key=len, reverse=True):
         s = re.sub(re.escape(phrase), " ", s, flags=re.IGNORECASE)
     return s
 
 def remove_empty_parentheses(s: str) -> str:
-    """
-    Remove parentheses that become empty after junk stripping:
-      "(Unabridged)" -> after removing "Unabridged" -> "( )" -> remove.
-    Also removes () or ( - ) etc.
-    """
     # remove any parens with no alphanumerics inside
     s = re.sub(r"\(\s*[^A-Za-z0-9]*\s*\)", " ", s)
     return s
@@ -154,11 +157,9 @@ def clean_title_text(s: str) -> Tuple[str, Optional[str], str]:
     s = strip_junk_phrases(s)
 
     # Remove stray filetype tokens that can linger after junk stripping
-    s = re.sub(r"\b(mp3|m4b|m4a|aax)\b", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b(mp3|m4b|m4a|aax|mobi|epub)\b", " ", s, flags=re.IGNORECASE)
 
-    # NEW: remove empty ( ) blocks created by stripping words inside parentheses
     s = remove_empty_parentheses(s)
-
     s = re.sub(r"[-–—]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
 
@@ -281,10 +282,10 @@ def is_chapterish_mp3_names(files: List[Path]) -> bool:
     hits = sum(1 for p in mp3s if looks_num(p.stem))
     return hits >= max(2, int(len(mp3s) * 0.6))
 
-def gather_audio_recursive(d: Path) -> List[Path]:
+def gather_media_recursive(d: Path) -> List[Path]:
     out: List[Path] = []
     for p in d.rglob("*"):
-        if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
+        if p.is_file() and p.suffix.lower() in MEDIA_EXTS:
             out.append(p)
     return sorted(out)
 
@@ -347,13 +348,13 @@ def ensure_unique_dir(path: Path) -> Path:
             return cand
     return Path(str(path) + f" ({int(time.time())})")
 
-def audio_files_exist_in_dest(src_audio: List[Path], dst_dir: Path) -> bool:
+def files_exist_in_dest(src_files: List[Path], dst_dir: Path) -> bool:
     if not dst_dir.exists():
         return False
-    existing_any = any((dst_dir / f.name).exists() for f in src_audio)
+    existing_any = any((dst_dir / f.name).exists() for f in src_files)
     if not existing_any:
         return False
-    return all((dst_dir / f.name).exists() for f in src_audio)
+    return all((dst_dir / f.name).exists() for f in src_files)
 
 def move_to_duplicates(src_path: Path, src_root: Path, dry_run: bool) -> None:
     dup_root = src_root / DUPLICATES_DIRNAME
@@ -389,10 +390,11 @@ def is_multipart_single_book(files: List[Path]) -> bool:
     if len(files) < 2:
         return False
 
-    stems = [sanitize_spaces(f.stem) for f in files if f.suffix.lower() in AUDIO_EXTS]
-    if len(stems) < 2:
+    mp3s = [f for f in files if f.suffix.lower() == ".mp3"]
+    if len(mp3s) < 2:
         return False
 
+    stems = [sanitize_spaces(f.stem) for f in mp3s]
     bases: List[str] = []
     marker_hits = 0
 
@@ -401,7 +403,12 @@ def is_multipart_single_book(files: List[Path]) -> bool:
         st2 = re.sub(r"\s+", " ", st2).strip()
         if MULTIPART_RE.search(st2):
             marker_hits += 1
-            st2 = re.sub(r"[\s\-_.]*\b(?:part|pt|cd|disc|disk|vol|volume)\s*0*\d{1,3}\b.*$", "", st2, flags=re.IGNORECASE).strip()
+            st2 = re.sub(
+                r"[\s\-_.]*\b(?:part|pt|cd|disc|disk|vol|volume)\s*0*\d{1,3}\b.*$",
+                "",
+                st2,
+                flags=re.IGNORECASE
+            ).strip()
         bases.append(st2.lower())
 
     if marker_hits < max(2, int(len(stems) * 0.6)):
@@ -439,13 +446,13 @@ def process_book_dir(book_dir: Path, dest_root: Path, dry_run: bool, author_hint
 
     dst_dir = dest_root / author / title_clean
 
-    audio_files = gather_audio_recursive(book_dir)
-    if not audio_files:
+    media_files = gather_media_recursive(book_dir)
+    if not media_files:
         return
 
     sidecars = gather_sidecars_recursive(book_dir)
 
-    if audio_files_exist_in_dest(audio_files, dst_dir):
+    if files_exist_in_dest(media_files + sidecars, dst_dir):
         log(f"SKIP BOOK (already ingested): '{title_clean}' | AUTHOR: '{author}'")
         log(f"DEST: {dst_dir}")
         move_to_duplicates(book_dir, src_root, dry_run)
@@ -454,19 +461,21 @@ def process_book_dir(book_dir: Path, dest_root: Path, dry_run: bool, author_hint
     log(f"BOOK: '{title_clean}' | AUTHOR: '{author}'")
     log(f"DEST: {dst_dir}")
 
-    for f in audio_files:
+    for f in media_files:
         move_file_skip_or_move_dup(f, dst_dir, src_root, dry_run)
     for f in sidecars:
         move_file_skip_or_move_dup(f, dst_dir, src_root, dry_run)
 
-def process_single_audio_file(f: Path, dest_root: Path, dry_run: bool, author_hint: Optional[str], src_root: Path) -> None:
+def process_single_media_file(f: Path, dest_root: Path, dry_run: bool, author_hint: Optional[str], src_root: Path) -> None:
     stem = f.stem
     title_text, author_text = parse_title_author_from_text(stem)
 
-    tags = ffprobe_tags(f)
-    tag_author = pick_author_from_tags(tags)
-    if not author_text and tag_author:
-        author_text = tag_author
+    # Only try ffprobe tags for actual audio formats
+    if f.suffix.lower() in AUDIO_EXTS:
+        tags = ffprobe_tags(f)
+        tag_author = pick_author_from_tags(tags)
+        if not author_text and tag_author:
+            author_text = tag_author
 
     title_clean, author = resolve_title_author(title_text, author_text, author_hint)
     dst_dir = dest_root / author / title_clean
@@ -482,8 +491,8 @@ def process_path(p: Path, dest_root: Path, dry_run: bool, author_hint: Optional[
     if p.name in ("_failed_zips", DUPLICATES_DIRNAME):
         return
 
-    if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
-        process_single_audio_file(p, dest_root, dry_run, author_hint, src_root)
+    if p.is_file() and p.suffix.lower() in MEDIA_EXTS:
+        process_single_media_file(p, dest_root, dry_run, author_hint, src_root)
         return
 
     if not p.is_dir():
@@ -493,19 +502,23 @@ def process_path(p: Path, dest_root: Path, dry_run: bool, author_hint: Optional[
     if looks_like_author_name(p.name):
         local_author_hint = p.name
 
-    direct_audio = sorted([x for x in p.iterdir() if x.is_file() and x.suffix.lower() in AUDIO_EXTS])
-    direct_mp3 = [x for x in direct_audio if x.suffix.lower() == ".mp3"]
+    direct_media = sorted([x for x in p.iterdir() if x.is_file() and x.suffix.lower() in MEDIA_EXTS])
+    direct_mp3 = [x for x in direct_media if x.suffix.lower() == ".mp3"]
+    direct_audio = [x for x in direct_media if x.suffix.lower() in AUDIO_EXTS]
 
     if not direct_audio and has_disc_subdirs_with_audio(p):
         process_book_dir(p, dest_root, dry_run, local_author_hint, src_root)
         return
 
-    if direct_audio:
-        if is_chapterish_mp3_names(direct_mp3) or len(direct_audio) == 1 or is_multipart_single_book(direct_audio):
+    if direct_media:
+        # If it's clearly a “single book folder” (chapters / multipart / single file),
+        # ingest the whole folder as one book.
+        if (direct_audio and (is_chapterish_mp3_names(direct_mp3) or len(direct_media) == 1 or is_multipart_single_book(direct_media))) or (not direct_audio):
             process_book_dir(p, dest_root, dry_run, local_author_hint, src_root)
         else:
-            for f in direct_audio:
-                process_single_audio_file(f, dest_root, dry_run, local_author_hint, src_root)
+            # Otherwise treat each file as its own “book”
+            for f in direct_media:
+                process_single_media_file(f, dest_root, dry_run, local_author_hint, src_root)
         return
 
     for d in sorted([d for d in p.iterdir() if d.is_dir()]):
@@ -546,4 +559,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

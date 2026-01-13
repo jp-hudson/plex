@@ -381,6 +381,11 @@ ingest_mp4_files() {
       SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
       TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}" | sed 's/[()]+//g')")")"
 
+      # FIX: if the “episode title” is just a release tag like DUAL, drop it
+      if [[ "$TITLE" =~ ^[Dd][Uu][Aa][Ll]$ ]]; then
+        TITLE=""
+      fi
+
       # Anime TV routing
       if [[ "$SERIES" =~ $ANIME_SHOW_REGEX ]]; then
         TV_ROOT="$ANIME_DIR"
@@ -465,6 +470,11 @@ encode_dir() {
 
       SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
       TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}" | sed 's/[()]+//g')")")"
+
+      # FIX: if the “episode title” is just a release tag like DUAL, drop it
+      if [[ "$TITLE" =~ ^[Dd][Uu][Aa][Ll]$ ]]; then
+        TITLE=""
+      fi
 
       # Anime TV routing
       if [[ "$SERIES" =~ $ANIME_SHOW_REGEX ]]; then
@@ -556,4 +566,3 @@ if [[ "$KEEP_RAW" -eq 0 ]]; then
   rm -rf "$RAW_DIR"
 fi
 echo "Ingest complete."
-
