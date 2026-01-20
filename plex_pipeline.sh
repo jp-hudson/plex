@@ -131,7 +131,8 @@ PY
 # Shared "junk" stripper for titles (works for both MKV and MP4 naming)
 strip_release_junk() {
   # NOTE: Keep this conservative; it only removes from the first matched token onward.
-  echo "$1" | sed -E 's/(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|HEVC|AV1|DDP[0-9. ]+|AAC[0-9. ]+|EAC3|AC3|TRUEHD|ATMOS|ESub|Eng).*//Ig'
+  # IMPORTANT FIX: require a non-alphanumeric boundary before the token so "NF" doesn't match inside "Infinity".
+  echo "$1" | sed -E 's/(^|[^[:alnum:]])(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|HEVC|AV1|DDP[0-9. ]+|AAC[0-9. ]+|EAC3|AC3|TRUEHD|ATMOS|ESub|Eng).*$/\1/Ig'
 }
 
 move_dir_unique() {
