@@ -21,7 +21,7 @@ KEEP_RAW=0
 # should we delete it and retry clean?
 UNZIP_RETRY_CLEAN=1
 
-ANIME_SHOW_REGEX="Naruto|Bleach|One Piece|Attack on Titan"
+ANIME_SHOW_REGEX="Naruto|Bleach|One Piece|Attack on Titan|Solo Leveling"
 ANIME_MOVIE_REGEX="Ghibli|Spirited Away|Your Name|Suzume"
 
 # ---------------- AUDIO HANDOFF ----------------
@@ -148,12 +148,82 @@ move_dir_unique() {
 
 has_audio() {
   local dir="$1"
-  find "$dir" -type f \( -iname '*.mp3' -o -iname '*.m4b' -o -iname '*.m4a' \) -print -quit | grep -q .
+  find "$dir" -type f \( \
+    -iname '*.mp3' -o -iname '*.m4b' -o -iname '*.m4a' -o -iname '*.epub' -o -iname '*.mobi' \
+  \) -print -quit | grep -q .
 }
 
 has_video() {
   local dir="$1"
   find "$dir" -type f \( -iname '*.mkv' -o -iname '*.mp4' \) -print -quit | grep -q .
+}
+
+# ----------------------------------------------------------
+# NEW: Featurettes/Extras routing helper
+# If a file lives under a directory named Featurettes/Extras/Bonus,
+# route it to: <TV or Anime>/<Series>/seasonXX/featurettes/<Title>.mp4
+#
+# Returns 0 and echoes full OUT path if it can parse series+season.
+# Returns 1 if not a featurette path or parsing fails (fallback to old logic).
+# ----------------------------------------------------------
+compute_featurette_out() {
+  local file="$1"
+  local base_title="$2"
+
+  local cur feat_dir dirbase low next
+  cur="$(dirname "$file")"
+  feat_dir=""
+
+  while :; do
+    dirbase="$(basename "$cur")"
+    low="$(echo "$dirbase" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$low" == "featurettes" || "$low" == "featurette" || "$low" == "extras" || "$low" == "bonus" || "$low" == "bonusfeatures" || "$low" == "bonus features" ]]; then
+      feat_dir="$cur"
+      break
+    fi
+    next="$(dirname "$cur")"
+    [[ "$next" == "$cur" ]] && break
+    cur="$next"
+  done
+
+  [[ -n "$feat_dir" ]] || return 1
+
+  local show_dir show_base season_raw season series_part series tv_root title_clean dest out
+  show_dir="$(dirname "$feat_dir")"
+  show_base="$(basename "$show_dir")"
+
+  # Season: prefer "S02" in the show dir name; fallback to "Season 2"
+  season_raw="$(echo "$show_base" | sed -nE 's/.*[Ss]([0-9]{1,2}).*/\1/p' | head -1)"
+  if [[ -z "$season_raw" ]]; then
+    season_raw="$(echo "$show_base" | sed -nE 's/.*[Ss]eason[[:space:]]*([0-9]{1,2}).*/\1/p' | head -1)"
+  fi
+  [[ -n "$season_raw" ]] || return 1
+  season="$(printf "%02d" "$((10#$season_raw))")"
+
+  # Series name: strip year + everything from Sxx onward
+  series_part="$(echo "$show_base" | sed -E 's/\([[:space:]]*(19|20)[0-9]{2}[[:space:]]*\)//g; s/\[[[:space:]]*(19|20)[0-9]{2}[[:space:]]*\]//g')"
+  series_part="$(echo "$series_part" | sed -E 's/[Ss][0-9]{1,2}.*$//')"
+  series_part="$(strip_release_junk "$series_part")"
+  series="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$series_part")")")"
+  [[ -n "$series" ]] || return 1
+
+  # Decide TV root (anime vs normal TV)
+  if [[ "$series" =~ $ANIME_SHOW_REGEX ]]; then
+    tv_root="$ANIME_DIR"
+  else
+    tv_root="$TV_DIR"
+  fi
+
+  # Clean featurette title from filename stem
+  title_clean="$(strip_release_junk "$base_title")"
+  title_clean="$(echo "$title_clean" | sed -E 's/[()]+//g')"
+  title_clean="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$title_clean")")")"
+  [[ -n "$title_clean" ]] || title_clean="Featurette"
+
+  dest="$tv_root/$series/season${season}/featurettes"
+  out="$dest/$title_clean.mp4"
+  echo "$out"
+  return 0
 }
 
 ############################################################
@@ -249,7 +319,7 @@ mkdir -p "$RAW_DIR"
 
 # Move loose audio files straight into AUDIO_QUEUE so RAW cleanup won't remove them
 shopt -s nullglob
-for f in "$INPUT_DIR"/*.mp3 "$INPUT_DIR"/*.m4b "$INPUT_DIR"/*.m4a; do
+for f in "$INPUT_DIR"/*.mp3 "$INPUT_DIR"/*.m4b "$INPUT_DIR"/*.m4a "$INPUT_DIR"/*.epub "$INPUT_DIR"/*.mobi; do
   [[ -f "$f" ]] || continue
   echo "AUDIO FILE DETECTED | moving to queue: $f"
   echo "AUDIO FILE DETECTED | moving to queue: $f" >> "$INGEST_LOG"
@@ -345,9 +415,10 @@ done
 
 # Rename every MKV anywhere under RAW_DIR (so reruns “start over” cleanly)
 # TV detection upgraded to also catch: S01 E01, S01-E01, S01_E01, S01.E01 (etc.)
+# AND case-insensitive s/e.
 while IFS= read -r -d '' f; do
   base="$(basename "$f")"
-  if [[ "$base" =~ S[0-9]{1,2}[[:space:]_.-]*E[0-9]{1,2} ]]; then
+  if [[ "$base" =~ [Ss][0-9]{1,2}[[:space:]_.-]*[Ee][0-9]{1,2} ]]; then
     clean_mkv_name_tv "$f"
   else
     clean_mkv_name_movie "$f"
@@ -357,9 +428,6 @@ done < <(find "$RAW_DIR" -type f -name '*.mkv' -print0)
 ############################################################
 # =========== STEP 2.5: INGEST PRE-ENCODED MP4 ============
 ############################################################
-# If an MP4 shows up (either dropped directly, or inside a ZIP),
-# do NOT HandBrake it. Just normalize name, create Plex folder,
-# and move it into place.
 
 ingest_mp4_files() {
   while IFS= read -r -d '' FILE; do
@@ -367,11 +435,32 @@ ingest_mp4_files() {
 
     BASENAME="$(basename "$FILE" .mp4)"
 
-    # Normalize common TV patterns like:
-    #   "S01 E01", "S01-E01", "S01_E01", "S01.E01" -> "S01E01"
-    BASENAME_TV="$(echo "$BASENAME" | sed -E 's/S([0-9]{1,2})[[:space:]_.-]*E([0-9]{1,2})/S\1E\2/g')"
+    # NEW: Featurettes/Extras routing (pre-encoded mp4)
+    if OUT_F="$(compute_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
+      DEST_F="$(dirname "$OUT_F")"
+      mkdir -p "$DEST_F"
 
-    if [[ "$BASENAME_TV" =~ S([0-9]{1,2})E([0-9]{1,2}) ]]; then
+      if [[ -f "$OUT_F" && -s "$OUT_F" ]]; then
+        echo "SKIP (exists): $OUT_F"
+        echo "SKIP (exists): $OUT_F" >> "$INGEST_LOG"
+        continue
+      fi
+
+      echo "MOVE FEATURETTE MP4 | $FILE -> $OUT_F"
+      echo "MOVE FEATURETTE MP4 | $FILE -> $OUT_F" >> "$INGEST_LOG"
+
+      TMP="$OUT_F.partial"
+      rm -f "$TMP" 2>/dev/null || true
+      mv "$FILE" "$TMP"
+      mv "$TMP" "$OUT_F"
+      continue
+    fi
+
+    # Normalize common TV patterns like:
+    #   "S01 E01", "S01-E01", "S01_E01", "S01.E01" -> "S01E01" (case-insensitive)
+    BASENAME_TV="$(echo "$BASENAME" | sed -E 's/[Ss]([0-9]{1,2})[[:space:]_.-]*[Ee]([0-9]{1,2})/S\1E\2/g')"
+
+    if [[ "$BASENAME_TV" =~ [Ss]([0-9]{1,2})[Ee]([0-9]{1,2}) ]]; then
       SEASON_RAW="${BASH_REMATCH[1]}"
       EPISODE_RAW="${BASH_REMATCH[2]}"
 
@@ -457,11 +546,39 @@ encode_dir() {
     [[ "$WIDTH" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid width '$WIDTH' for $FILE"; exit 1; }
     (( WIDTH >= FOUR_K_MIN_WIDTH )) && TAG="4K" || TAG="1080p"
 
-    # Normalize common TV patterns like:
-    #   "S01 E01", "S01-E01", "S01_E01", "S01.E01" -> "S01E01"
-    BASENAME_TV="$(echo "$BASENAME" | sed -E 's/S([0-9]{1,2})[[:space:]_.-]*E([0-9]{1,2})/S\1E\2/g')"
+    # NEW: Featurettes/Extras routing (HandBrake)
+    if OUT_F="$(compute_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
+      DEST_F="$(dirname "$OUT_F")"
+      mkdir -p "$DEST_F"
 
-    if [[ "$BASENAME_TV" =~ S([0-9]{1,2})E([0-9]{1,2}) ]]; then
+      if [[ -f "$OUT_F" && -s "$OUT_F" ]]; then
+        echo "SKIP (exists): $OUT_F"
+        echo "SKIP (exists): $OUT_F" >> "$INGEST_LOG"
+        continue
+      fi
+
+      TMP="$OUT_F.partial"
+      rm -f "$TMP" 2>/dev/null || true
+
+      if [[ "$TAG" == "4K" ]]; then
+        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 )
+      else
+        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize )
+      fi
+
+      echo "RUNNING | ${CMD[*]}"
+      echo "RUNNING | ${CMD[*]}" >> "$INGEST_LOG"
+
+      "${CMD[@]}" </dev/null
+      mv "$TMP" "$OUT_F"
+      continue
+    fi
+
+    # Normalize common TV patterns like:
+    #   "S01 E01", "S01-E01", "S01_E01", "S01.E01" -> "S01E01" (case-insensitive)
+    BASENAME_TV="$(echo "$BASENAME" | sed -E 's/[Ss]([0-9]{1,2})[[:space:]_.-]*[Ee]([0-9]{1,2})/S\1E\2/g')"
+
+    if [[ "$BASENAME_TV" =~ [Ss]([0-9]{1,2})[Ee]([0-9]{1,2}) ]]; then
       SEASON_RAW="${BASH_REMATCH[1]}"
       EPISODE_RAW="${BASH_REMATCH[2]}"
 
@@ -566,3 +683,4 @@ if [[ "$KEEP_RAW" -eq 0 ]]; then
   rm -rf "$RAW_DIR"
 fi
 echo "Ingest complete."
+

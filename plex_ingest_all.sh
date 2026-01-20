@@ -3,9 +3,11 @@ set -euo pipefail
 
 DROP="${1:-/Users/jhudson/PlexDrop}"
 
-# Run your existing (working) video pipeline unchanged
+# Video pipeline (unchanged)
 /Users/jhudson/code/plex/plex_pipeline.sh "$DROP"
 
-# Then process audiobooks left in the DROP folder
-/usr/bin/python3 /Users/jhudson/code/plex/audiobook_pipeline.py "$DROP"
+# NEW: siphon music first (prevents mp3 albums from being ingested as audiobooks)
+/usr/bin/python3 /Users/jhudson/code/plex/music_pipeline.py "$DROP"
 
+# Audiobooks next
+/usr/bin/python3 /Users/jhudson/code/plex/audiobook_pipeline.py "$DROP"
