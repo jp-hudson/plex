@@ -130,9 +130,10 @@ PY
 
 # Shared "junk" stripper for titles (works for both MKV and MP4 naming)
 strip_release_junk() {
-  # NOTE: Keep this conservative; it only removes from the first matched token onward.
-  # IMPORTANT FIX: require a non-alphanumeric boundary before the token so "NF" doesn't match inside "Infinity".
-  echo "$1" | sed -E 's/(^|[^[:alnum:]])(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|HEVC|AV1|DDP[0-9. ]+|AAC[0-9. ]+|EAC3|AC3|TRUEHD|ATMOS|ESub|Eng).*$/\1/Ig'
+  # IMPORTANT:
+  # Match tokens as stand-alone “words” only. This prevents false matches like:
+  #   "Infinity" containing "NF"  ->  "I"
+  echo "$1" | sed -E 's/(^|[^[:alnum:]])(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|HEVC|AV1|DDP[0-9. ]+|AAC[0-9. ]+|EAC3|AC3|TRUEHD|ATMOS|ESub|Eng)([^[:alnum:]]|$).*$//'I
 }
 
 move_dir_unique() {
@@ -160,12 +161,12 @@ has_video() {
 }
 
 # ----------------------------------------------------------
-# NEW: Featurettes/Extras routing helper
-# If a file lives under a directory named Featurettes/Extras/Bonus,
+# Featurettes/Extras routing helper (TV/Anime shows)
+# If a file lives under Featurettes/Extras/Bonus,
 # route it to: <TV or Anime>/<Series>/seasonXX/featurettes/<Title>.mp4
 #
 # Returns 0 and echoes full OUT path if it can parse series+season.
-# Returns 1 if not a featurette path or parsing fails (fallback to old logic).
+# Returns 1 if not a featurette path or parsing fails.
 # ----------------------------------------------------------
 compute_featurette_out() {
   local file="$1"
@@ -201,9 +202,15 @@ compute_featurette_out() {
   [[ -n "$season_raw" ]] || return 1
   season="$(printf "%02d" "$((10#$season_raw))")"
 
-  # Series name: strip year + everything from Sxx onward
+  # Series name: strip year + any trailing Season labels + everything from Sxx onward
   series_part="$(echo "$show_base" | sed -E 's/\([[:space:]]*(19|20)[0-9]{2}[[:space:]]*\)//g; s/\[[[:space:]]*(19|20)[0-9]{2}[[:space:]]*\]//g')"
+
+  # FIX: remove folders like "Ash vs Evil Dead Season 2" -> "Ash vs Evil Dead"
+  series_part="$(echo "$series_part" | sed -E 's/[[:space:]]+[Ss]eason[[:space:]]*[0-9]{1,2}.*$//')"
+
+  # Existing behavior: also strip from "S02..." patterns if present
   series_part="$(echo "$series_part" | sed -E 's/[Ss][0-9]{1,2}.*$//')"
+
   series_part="$(strip_release_junk "$series_part")"
   series="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$series_part")")")"
   [[ -n "$series" ]] || return 1
@@ -222,6 +229,66 @@ compute_featurette_out() {
   [[ -n "$title_clean" ]] || title_clean="Featurette"
 
   dest="$tv_root/$series/season${season}/featurettes"
+  out="$dest/$title_clean.mp4"
+  echo "$out"
+  return 0
+}
+
+
+# ----------------------------------------------------------
+# NEW: Movie Featurettes/Extras routing helper
+# If a file lives under Movies/.../<ReleaseFolder>/Featurettes/...,
+# route it to: <Movies>/<Movie Title>/featurettes/<Title>.mp4
+#
+# Returns 0 and echoes OUT path if featurette dir is detected.
+# Returns 1 otherwise.
+# ----------------------------------------------------------
+compute_movie_featurette_out() {
+  local file="$1"
+  local base_title="$2"
+
+  local cur feat_dir dirbase low next
+  cur="$(dirname "$file")"
+  feat_dir=""
+
+  while :; do
+    dirbase="$(basename "$cur")"
+    low="$(echo "$dirbase" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$low" == "featurettes" || "$low" == "featurette" || "$low" == "extras" || "$low" == "bonus" || "$low" == "bonusfeatures" || "$low" == "bonus features" ]]; then
+      feat_dir="$cur"
+      break
+    fi
+    next="$(dirname "$cur")"
+    [[ "$next" == "$cur" ]] && break
+    cur="$next"
+  done
+
+  [[ -n "$feat_dir" ]] || return 1
+
+  # Parent of Featurettes is the “release folder” for a movie
+  local rel_dir rel_base norm year title_raw movie_title title_clean dest out
+  rel_dir="$(dirname "$feat_dir")"
+  rel_base="$(basename "$rel_dir")"
+
+  norm="$(echo "$rel_base" | sed 's/[._]/ /g')"
+  year="$(echo "$norm" | grep -oE '(19|20)[0-9]{2}' | head -1 || true)"
+
+  if [[ -n "${year:-}" ]]; then
+    title_raw="$(echo "$norm" | sed -E "s/[[:space:]]*\(?$year\)?.*//")"
+  else
+    title_raw="$norm"
+  fi
+
+  title_raw="$(strip_release_junk "$title_raw")"
+  movie_title="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$title_raw")")")"
+  [[ -n "$movie_title" ]] || return 1
+
+  title_clean="$(strip_release_junk "$base_title")"
+  title_clean="$(echo "$title_clean" | sed -E 's/[()]+//g')"
+  title_clean="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$title_clean")")")"
+  [[ -n "$title_clean" ]] || title_clean="Featurette"
+
+  dest="$MOVIES_DIR/$movie_title/featurettes"
   out="$dest/$title_clean.mp4"
   echo "$out"
   return 0
@@ -377,7 +444,7 @@ for ZIP in "$RAW_DIR"/*.zip; do
   rc=$?
   set -e
 
-  # NEW: If this ZIP produced audio-only content, move it to AUDIO_QUEUE immediately
+  # If this ZIP produced audio-only content, move it to AUDIO_QUEUE immediately
   if [[ -d "$DEST_DIR" ]] && has_audio "$DEST_DIR" && ! has_video "$DEST_DIR"; then
     echo "AUDIO ZIP DETECTED | preserving extracted audio: $(basename "$ZIP")"
     echo "AUDIO ZIP DETECTED | preserving extracted audio: $(basename "$ZIP")" >> "$INGEST_LOG"
@@ -396,7 +463,6 @@ for ZIP in "$RAW_DIR"/*.zip; do
       mv "$ZIP" "$AUDIO_FAILED_ZIPS/" 2>/dev/null || true
     fi
 
-    # Do NOT touch the normal video marker logic for audio zips (we moved the whole dir out)
     continue
   fi
 
@@ -406,7 +472,6 @@ for ZIP in "$RAW_DIR"/*.zip; do
   else
     echo "WARNING: unzip failed for $(basename "$ZIP") (exit=$rc). Will retry next run."
     echo "WARNING: unzip failed for $(basename "$ZIP") (exit=$rc)" >> "$INGEST_LOG"
-    # leave NO marker so it retries later
   fi
 done
 
@@ -436,7 +501,7 @@ ingest_mp4_files() {
 
     BASENAME="$(basename "$FILE" .mp4)"
 
-    # NEW: Featurettes/Extras routing (pre-encoded mp4)
+    # Featurettes/Extras routing (TV first, then Movies)
     if OUT_F="$(compute_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
       DEST_F="$(dirname "$OUT_F")"
       mkdir -p "$DEST_F"
@@ -457,8 +522,27 @@ ingest_mp4_files() {
       continue
     fi
 
-    # Normalize common TV patterns like:
-    #   "S01 E01", "S01-E01", "S01_E01", "S01.E01" -> "S01E01" (case-insensitive)
+    if OUT_M="$(compute_movie_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
+      DEST_M="$(dirname "$OUT_M")"
+      mkdir -p "$DEST_M"
+
+      if [[ -f "$OUT_M" && -s "$OUT_M" ]]; then
+        echo "SKIP (exists): $OUT_M"
+        echo "SKIP (exists): $OUT_M" >> "$INGEST_LOG"
+        continue
+      fi
+
+      echo "MOVE MOVIE FEATURETTE MP4 | $FILE -> $OUT_M"
+      echo "MOVE MOVIE FEATURETTE MP4 | $FILE -> $OUT_M" >> "$INGEST_LOG"
+
+      TMP="$OUT_M.partial"
+      rm -f "$TMP" 2>/dev/null || true
+      mv "$FILE" "$TMP"
+      mv "$TMP" "$OUT_M"
+      continue
+    fi
+
+    # Normalize common TV patterns (case-insensitive)
     BASENAME_TV="$(echo "$BASENAME" | sed -E 's/[Ss]([0-9]{1,2})[[:space:]_.-]*[Ee]([0-9]{1,2})/S\1E\2/g')"
 
     if [[ "$BASENAME_TV" =~ [Ss]([0-9]{1,2})[Ee]([0-9]{1,2}) ]]; then
@@ -471,12 +555,10 @@ ingest_mp4_files() {
       SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
       TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}" | sed 's/[()]+//g')")")"
 
-      # FIX: if the “episode title” is just a release tag like DUAL, drop it
       if [[ "$TITLE" =~ ^[Dd][Uu][Aa][Ll]$ ]]; then
         TITLE=""
       fi
 
-      # Anime TV routing
       if [[ "$SERIES" =~ $ANIME_SHOW_REGEX ]]; then
         TV_ROOT="$ANIME_DIR"
       else
@@ -485,10 +567,8 @@ ingest_mp4_files() {
 
       DEST="$TV_ROOT/$SERIES/season${SEASON}"
       mkdir -p "$DEST"
-
       OUT="$DEST/$SERIES - S${SEASON}E${EPISODE}${TITLE:+ - $TITLE}.mp4"
     else
-      # Movie MP4
       norm="$(echo "$BASENAME" | sed 's/[._]/ /g')"
       YEAR="$(echo "$norm" | grep -oE '(19|20)[0-9]{2}' | head -1 || true)"
 
@@ -501,7 +581,6 @@ ingest_mp4_files() {
       TITLE_RAW="$(strip_release_junk "$TITLE_RAW")"
       TITLE="$(maybe_title_case "$(sanitize_name "$TITLE_RAW")")"
 
-      # Anime movie routing
       if [[ "$TITLE" =~ $ANIME_MOVIE_REGEX ]]; then
         MOV_ROOT="$ANIME_DIR"
       else
@@ -547,7 +626,7 @@ encode_dir() {
     [[ "$WIDTH" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid width '$WIDTH' for $FILE"; exit 1; }
     (( WIDTH >= FOUR_K_MIN_WIDTH )) && TAG="4K" || TAG="1080p"
 
-    # NEW: Featurettes/Extras routing (HandBrake)
+    # Featurettes/Extras routing (TV first, then Movies)
     if OUT_F="$(compute_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
       DEST_F="$(dirname "$OUT_F")"
       mkdir -p "$DEST_F"
@@ -575,8 +654,33 @@ encode_dir() {
       continue
     fi
 
-    # Normalize common TV patterns like:
-    #   "S01 E01", "S01-E01", "S01_E01", "S01.E01" -> "S01E01" (case-insensitive)
+    if OUT_M="$(compute_movie_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
+      DEST_M="$(dirname "$OUT_M")"
+      mkdir -p "$DEST_M"
+
+      if [[ -f "$OUT_M" && -s "$OUT_M" ]]; then
+        echo "SKIP (exists): $OUT_M"
+        echo "SKIP (exists): $OUT_M" >> "$INGEST_LOG"
+        continue
+      fi
+
+      TMP="$OUT_M.partial"
+      rm -f "$TMP" 2>/dev/null || true
+
+      if [[ "$TAG" == "4K" ]]; then
+        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 )
+      else
+        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize )
+      fi
+
+      echo "RUNNING | ${CMD[*]}"
+      echo "RUNNING | ${CMD[*]}" >> "$INGEST_LOG"
+
+      "${CMD[@]}" </dev/null
+      mv "$TMP" "$OUT_M"
+      continue
+    fi
+
     BASENAME_TV="$(echo "$BASENAME" | sed -E 's/[Ss]([0-9]{1,2})[[:space:]_.-]*[Ee]([0-9]{1,2})/S\1E\2/g')"
 
     if [[ "$BASENAME_TV" =~ [Ss]([0-9]{1,2})[Ee]([0-9]{1,2}) ]]; then
@@ -589,12 +693,10 @@ encode_dir() {
       SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
       TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}" | sed 's/[()]+//g')")")"
 
-      # FIX: if the “episode title” is just a release tag like DUAL, drop it
       if [[ "$TITLE" =~ ^[Dd][Uu][Aa][Ll]$ ]]; then
         TITLE=""
       fi
 
-      # Anime TV routing
       if [[ "$SERIES" =~ $ANIME_SHOW_REGEX ]]; then
         TV_ROOT="$ANIME_DIR"
       else
@@ -608,7 +710,6 @@ encode_dir() {
       YEAR="$(echo "$BASENAME" | grep -oE '(19|20)[0-9]{2}' | head -1 || true)"
       TITLE="$(maybe_title_case "$(sanitize_name "$(echo "$BASENAME" | sed -E 's/[[:space:]\(]*(19|20)[0-9]{2}.*$//')")")"
 
-      # Anime movie routing
       if [[ "$TITLE" =~ $ANIME_MOVIE_REGEX ]]; then
         MOV_ROOT="$ANIME_DIR"
       else
