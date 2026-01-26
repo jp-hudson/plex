@@ -360,7 +360,27 @@ def process_single_music_file(f: Path, dest_root: Path, dry_run: bool, src_root:
 def process_path(p: Path, dest_root: Path, dry_run: bool, src_root: Path) -> None:
     if p.name.startswith("."):
         return
-    if p.name in {DUPLICATES_DIRNAME, "_failed_zips", "_incoming_files", "_source_zips"}:
+
+    # Always ignore internal bookkeeping / zip staging dirs
+    if p.name in {DUPLICATES_DIRNAME, "_failed_zips", "_source_zips"}:
+        return
+
+    # IMPORTANT:
+    # We *do* want to process music_queue/_incoming_files (loose files staged by plex_pipeline),
+    # but we *do not* want to process audiobook_queue/_incoming_files as music.
+    if src_root.name == "audiobook_queue" and p.name == "_incoming_files":
+        return
+
+    # Special-case: treat _incoming_files as a “loose files bucket” and process each file
+    # individually to avoid mis-grouping multiple unrelated tracks as one album.
+    if p.is_dir() and p.name == "_incoming_files":
+        for item in sorted(p.iterdir()):
+            if item.name.startswith("."):
+                continue
+            if item.is_file() and item.suffix.lower() in MUSIC_EXTS:
+                process_single_music_file(item, dest_root, dry_run, src_root)
+            elif item.is_dir():
+                process_path(item, dest_root, dry_run, src_root)
         return
 
     # single music file
@@ -397,7 +417,7 @@ def main() -> int:
 
     args = ap.parse_args()
     src_str = args.source or args.positional_source or DEFAULT_SOURCE
-    dest_str = args.dest or DEFAULT_DEST
+    dest_str = args.dest or args.positional_source or DEFAULT_DEST
 
     base_src = Path(src_str).expanduser()
     dest = Path(dest_str).expanduser()
@@ -443,3 +463,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

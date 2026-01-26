@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure Automator/Shortcuts can find Homebrew tools (7z, gawk, etc.)
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 ############################################################
 # ======================= CONFIG ===========================
 ############################################################
@@ -12,6 +15,7 @@ PLEX_ROOT="/Volumes/Media"
 MOVIES_DIR="$PLEX_ROOT/Movies"
 TV_DIR="$PLEX_ROOT/TV"
 ANIME_DIR="$PLEX_ROOT/Anime"
+MUSIC_DIR="$PLEX_ROOT/Music"
 
 PRESET_1080P="HQ 1080p30 Surround"
 FOUR_K_MIN_WIDTH=3000
@@ -32,9 +36,14 @@ AUDIO_INCOMING_FILES="$AUDIO_QUEUE/_incoming_files"
 AUDIO_SOURCE_ZIPS="$AUDIO_QUEUE/_source_zips"
 AUDIO_FAILED_ZIPS="$AUDIO_QUEUE/_failed_zips"
 
-# If you want plex_pipeline.sh to invoke your audio pipeline automatically:
+# If you want plex_pipeline.sh to invoke your audiobook pipeline automatically:
 RUN_AUDIO_PIPELINE=0
 AUDIO_PIPELINE="/Users/jhudson/code/plex/audio_pipeline.py"
+
+# NEW: run music pipeline automatically so audio-only ZIPs actually end up in /Volumes/Media/Music
+RUN_MUSIC_PIPELINE=1
+# IMPORTANT: set this to where your music_pipeline.py lives
+MUSIC_PIPELINE="/Users/jhudson/code/plex/music_pipeline.py"
 
 ############################################################
 # ======================== LOGGING =========================
@@ -81,11 +90,8 @@ trim_dashes() {
 }
 
 # Title-case ONLY if the string has no uppercase letters already
-# (so we don't mess up iCarly, Se7en, WALL·E, etc.)
 maybe_title_case() {
   local s="$1"
-
-  # If there's already any uppercase, assume it's intentional
   if [[ "$s" =~ [A-Z] ]]; then
     echo "$s"
     return
@@ -105,8 +111,7 @@ def cap_token(tok: str) -> str:
     out = []
     for p in parts:
         if not p:
-            out.append(p)
-            continue
+            out.append(p); continue
         if re.fullmatch(r'[ivxlcdm]+', p):
             out.append(p.upper())
         elif re.search(r'\d', p):
@@ -128,11 +133,7 @@ print(" ".join(res))
 PY
 }
 
-# Shared "junk" stripper for titles (works for both MKV and MP4 naming)
 strip_release_junk() {
-  # IMPORTANT:
-  # Match tokens as stand-alone “words” only. This prevents false matches like:
-  #   "Infinity" containing "NF"  ->  "I"
   echo "$1" | sed -E 's/(^|[^[:alnum:]])(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|HEVC|AV1|DDP[0-9. ]+|AAC[0-9. ]+|EAC3|AC3|TRUEHD|ATMOS|ESub|Eng)([^[:alnum:]]|$).*$//'I
 }
 
@@ -151,7 +152,8 @@ move_dir_unique() {
 has_audio() {
   local dir="$1"
   find "$dir" -type f \( \
-    -iname '*.mp3' -o -iname '*.m4b' -o -iname '*.m4a' -o -iname '*.epub' -o -iname '*.mobi' \
+    -iname '*.mp3' -o -iname '*.m4b' -o -iname '*.m4a' -o -iname '*.flac' -o -iname '*.aac' -o -iname '*.alac' -o -iname '*.wav' -o -iname '*.aiff' -o -iname '*.ogg' -o -iname '*.opus' \
+    -o -iname '*.epub' -o -iname '*.mobi' \
   \) -print -quit | grep -q .
 }
 
@@ -160,14 +162,59 @@ has_video() {
   find "$dir" -type f \( -iname '*.mkv' -o -iname '*.mp4' \) -print -quit | grep -q .
 }
 
-# ----------------------------------------------------------
-# Featurettes/Extras routing helper (TV/Anime shows)
-# If a file lives under Featurettes/Extras/Bonus,
-# route it to: <TV or Anime>/<Series>/seasonXX/featurettes/<Title>.mp4
-#
-# Returns 0 and echoes full OUT path if it can parse series+season.
-# Returns 1 if not a featurette path or parsing fails.
-# ----------------------------------------------------------
+# NEW: flatten "DEST_DIR/<single_wrapper_folder>/..." -> "DEST_DIR/..."
+# This prevents Hyperlove/Hyperlove nesting when the ZIP already has a top folder.
+flatten_single_wrapper_dir() {
+  local d="$1"
+  [[ -d "$d" ]] || return 0
+
+  while :; do
+    # Any files directly under d?
+    if find "$d" -maxdepth 1 -type f -print -quit | grep -q .; then
+      return 0
+    fi
+
+    # Exactly one child directory?
+    shopt -s nullglob
+    local kids=("$d"/*)
+    shopt -u nullglob
+
+    if [[ "${#kids[@]}" -ne 1 ]]; then
+      return 0
+    fi
+    if [[ ! -d "${kids[0]}" ]]; then
+      return 0
+    fi
+
+    local inner="${kids[0]}"
+    local tmp="${d}.tmpflatten.$$"
+    mv "$inner" "$tmp"
+    rm -rf "$d"
+    mv "$tmp" "$d"
+    # loop again in case of multiple wrapper levels
+  done
+}
+
+# Prefer 7z; fall back to unzip. Never prompt.
+EXTRACT_LAST_RC=0
+extract_zip() {
+  local zip="$1"
+  local dest="$2"
+  local rc=0
+
+  if command -v 7z >/dev/null 2>&1; then
+    7z x -y -aoa -o"$dest" "$zip" </dev/null || rc=$?
+  else
+    unzip -oq "$zip" -d "$dest" </dev/null || rc=$?
+  fi
+
+  EXTRACT_LAST_RC=$rc
+  return 0
+}
+
+############################################################
+# Featurettes helpers (unchanged)
+############################################################
 compute_featurette_out() {
   local file="$1"
   local base_title="$2"
@@ -194,7 +241,6 @@ compute_featurette_out() {
   show_dir="$(dirname "$feat_dir")"
   show_base="$(basename "$show_dir")"
 
-  # Season: prefer "S02" in the show dir name; fallback to "Season 2"
   season_raw="$(echo "$show_base" | sed -nE 's/.*[Ss]([0-9]{1,2}).*/\1/p' | head -1)"
   if [[ -z "$season_raw" ]]; then
     season_raw="$(echo "$show_base" | sed -nE 's/.*[Ss]eason[[:space:]]*([0-9]{1,2}).*/\1/p' | head -1)"
@@ -202,27 +248,20 @@ compute_featurette_out() {
   [[ -n "$season_raw" ]] || return 1
   season="$(printf "%02d" "$((10#$season_raw))")"
 
-  # Series name: strip year + any trailing Season labels + everything from Sxx onward
   series_part="$(echo "$show_base" | sed -E 's/\([[:space:]]*(19|20)[0-9]{2}[[:space:]]*\)//g; s/\[[[:space:]]*(19|20)[0-9]{2}[[:space:]]*\]//g')"
-
-  # FIX: remove folders like "Ash vs Evil Dead Season 2" -> "Ash vs Evil Dead"
   series_part="$(echo "$series_part" | sed -E 's/[[:space:]]+[Ss]eason[[:space:]]*[0-9]{1,2}.*$//')"
-
-  # Existing behavior: also strip from "S02..." patterns if present
   series_part="$(echo "$series_part" | sed -E 's/[Ss][0-9]{1,2}.*$//')"
 
   series_part="$(strip_release_junk "$series_part")"
   series="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$series_part")")")"
   [[ -n "$series" ]] || return 1
 
-  # Decide TV root (anime vs normal TV)
   if [[ "$series" =~ $ANIME_SHOW_REGEX ]]; then
     tv_root="$ANIME_DIR"
   else
     tv_root="$TV_DIR"
   fi
 
-  # Clean featurette title from filename stem
   title_clean="$(strip_release_junk "$base_title")"
   title_clean="$(echo "$title_clean" | sed -E 's/[()]+//g')"
   title_clean="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$title_clean")")")"
@@ -234,15 +273,6 @@ compute_featurette_out() {
   return 0
 }
 
-
-# ----------------------------------------------------------
-# NEW: Movie Featurettes/Extras routing helper
-# If a file lives under Movies/.../<ReleaseFolder>/Featurettes/...,
-# route it to: <Movies>/<Movie Title>/featurettes/<Title>.mp4
-#
-# Returns 0 and echoes OUT path if featurette dir is detected.
-# Returns 1 otherwise.
-# ----------------------------------------------------------
 compute_movie_featurette_out() {
   local file="$1"
   local base_title="$2"
@@ -265,7 +295,6 @@ compute_movie_featurette_out() {
 
   [[ -n "$feat_dir" ]] || return 1
 
-  # Parent of Featurettes is the “release folder” for a movie
   local rel_dir rel_base norm year title_raw movie_title title_clean dest out
   rel_dir="$(dirname "$feat_dir")"
   rel_base="$(basename "$rel_dir")"
@@ -298,10 +327,8 @@ compute_movie_featurette_out() {
 # ============== CLEANUP FUNCTIONS (SPLIT) ================
 ############################################################
 
-# MOVIES: keep year if present
 clean_mkv_name_movie() {
   local file="$1" dir base name norm year title cleaned
-
   dir="$(dirname "$file")"
   base="$(basename "$file")"
   name="${base%.mkv}"
@@ -330,10 +357,8 @@ clean_mkv_name_movie() {
   fi
 }
 
-# TV: NEVER keep year, NEVER keep parentheses
 clean_mkv_name_tv() {
   local file="$1" dir base name cleaned
-
   dir="$(dirname "$file")"
   base="$(basename "$file")"
   name="${base%.mkv}"
@@ -354,20 +379,16 @@ clean_mkv_name_tv() {
 ############################################################
 # ============ STEP -0.5: STAGE AUDIO DIRS ================
 ############################################################
-# If someone drops a folder full of chapter MP3s/M4Bs into PlexDrop,
-# move that whole folder into AUDIO_QUEUE so cleanup won't touch it.
 
 stage_audio_dirs_from_input() {
-  # Only look at immediate subdirs of INPUT_DIR (not recursion)
-  # Skip known internal dirs.
   find "$INPUT_DIR" -maxdepth 1 -type d -mindepth 1 -print0 \
     | while IFS= read -r -d '' d; do
         b="$(basename "$d")"
         [[ "$b" == "$RAW_DIR_NAME" ]] && continue
         [[ "$b" == "logs" ]] && continue
         [[ "$b" == "$(basename "$AUDIO_QUEUE")" ]] && continue
+        [[ "$b" == *_queue ]] && continue
 
-        # audio-only folder? move it
         if has_audio "$d" && ! has_video "$d"; then
           echo "AUDIO DIR DETECTED | moving to queue: $d"
           echo "AUDIO DIR DETECTED | moving to queue: $d" >> "$INGEST_LOG"
@@ -387,7 +408,7 @@ mkdir -p "$RAW_DIR"
 
 # Move loose audio files straight into AUDIO_QUEUE so RAW cleanup won't remove them
 shopt -s nullglob
-for f in "$INPUT_DIR"/*.mp3 "$INPUT_DIR"/*.m4b "$INPUT_DIR"/*.m4a "$INPUT_DIR"/*.epub "$INPUT_DIR"/*.mobi; do
+for f in "$INPUT_DIR"/*.mp3 "$INPUT_DIR"/*.m4b "$INPUT_DIR"/*.m4a "$INPUT_DIR"/*.flac "$INPUT_DIR"/*.aac "$INPUT_DIR"/*.alac "$INPUT_DIR"/*.wav "$INPUT_DIR"/*.aiff "$INPUT_DIR"/*.ogg "$INPUT_DIR"/*.opus "$INPUT_DIR"/*.epub "$INPUT_DIR"/*.mobi; do
   [[ -f "$f" ]] || continue
   echo "AUDIO FILE DETECTED | moving to queue: $f"
   echo "AUDIO FILE DETECTED | moving to queue: $f" >> "$INGEST_LOG"
@@ -406,28 +427,23 @@ shopt -u nullglob
 # ================= STEP 1: UNZIP (RESTARTABLE) ============
 ############################################################
 
-# v1-style extraction layout: RAW_DIR/<zipname>/...
-# v2 fix: only mark success if unzip actually succeeds (exit 0 or 1).
 for ZIP in "$RAW_DIR"/*.zip; do
   [[ -f "$ZIP" ]] || continue
 
   DEST_DIR="$RAW_DIR/$(basename "$ZIP" .zip)"
   MARKER="$DEST_DIR/.unzipped_ok"
 
-  # If already successfully unzipped, never unzip again
   if [[ -f "$MARKER" ]]; then
     echo "SKIP UNZIP (already ok): $(basename "$ZIP")"
     continue
   fi
 
-  # If this folder already has MKVs, treat it as extracted (helps migrate from older runs)
   if [[ -d "$DEST_DIR" ]] && find "$DEST_DIR" -maxdepth 1 -type f -name '*.mkv' -print -quit | grep -q .; then
     echo "SKIP UNZIP (mkv already present): $(basename "$ZIP")"
     touch "$MARKER"
     continue
   fi
 
-  # If folder exists but no marker, assume previous unzip was incomplete and retry clean
   if [[ -d "$DEST_DIR" && "$UNZIP_RETRY_CLEAN" -eq 1 ]]; then
     echo "RETRY UNZIP (clean): removing incomplete $DEST_DIR"
     rm -rf "$DEST_DIR"
@@ -437,14 +453,12 @@ for ZIP in "$RAW_DIR"/*.zip; do
   echo "UNZIP | $(basename "$ZIP") -> $DEST_DIR"
   echo "UNZIP | $(basename "$ZIP") -> $DEST_DIR" >> "$INGEST_LOG"
 
-  # Important: </dev/null prevents interactive prompts (disk full, etc.)
-  # unzip exit codes: 0=ok, 1=warnings, >1=error
-  set +e
-  unzip -oq "$ZIP" -d "$DEST_DIR" </dev/null
-  rc=$?
-  set -e
+  extract_zip "$ZIP" "$DEST_DIR"
+  rc="$EXTRACT_LAST_RC"
 
-  # If this ZIP produced audio-only content, move it to AUDIO_QUEUE immediately
+  # NEW: flatten wrapper folder to avoid Hyperlove/Hyperlove
+  flatten_single_wrapper_dir "$DEST_DIR"
+
   if [[ -d "$DEST_DIR" ]] && has_audio "$DEST_DIR" && ! has_video "$DEST_DIR"; then
     echo "AUDIO ZIP DETECTED | preserving extracted audio: $(basename "$ZIP")"
     echo "AUDIO ZIP DETECTED | preserving extracted audio: $(basename "$ZIP")" >> "$INGEST_LOG"
@@ -453,9 +467,9 @@ for ZIP in "$RAW_DIR"/*.zip; do
     echo "AUDIO MOVED | $moved_to"
     echo "AUDIO MOVED | $moved_to" >> "$INGEST_LOG"
 
-    if [[ "$rc" -le 1 ]]; then
-      echo "AUDIO ZIP OK/WARN | moving zip to: $AUDIO_SOURCE_ZIPS"
-      echo "AUDIO ZIP OK/WARN | moving zip to: $AUDIO_SOURCE_ZIPS" >> "$INGEST_LOG"
+    if [[ "$rc" -le 2 ]]; then
+      echo "AUDIO ZIP OK/WARN (exit=$rc) | moving zip to: $AUDIO_SOURCE_ZIPS"
+      echo "AUDIO ZIP OK/WARN (exit=$rc) | moving zip to: $AUDIO_SOURCE_ZIPS" >> "$INGEST_LOG"
       mv "$ZIP" "$AUDIO_SOURCE_ZIPS/" 2>/dev/null || true
     else
       echo "AUDIO ZIP UNZIP ERROR (exit=$rc) | moving zip to: $AUDIO_FAILED_ZIPS"
@@ -463,11 +477,11 @@ for ZIP in "$RAW_DIR"/*.zip; do
       mv "$ZIP" "$AUDIO_FAILED_ZIPS/" 2>/dev/null || true
     fi
 
+    touch "$MARKER" 2>/dev/null || true
     continue
   fi
 
-  # Normal (video) behavior
-  if [[ "$rc" -le 1 ]]; then
+  if [[ "$rc" -le 2 ]]; then
     touch "$MARKER"
   else
     echo "WARNING: unzip failed for $(basename "$ZIP") (exit=$rc). Will retry next run."
@@ -479,9 +493,6 @@ done
 # ================= STEP 2: RENAME MKVS ====================
 ############################################################
 
-# Rename every MKV anywhere under RAW_DIR (so reruns “start over” cleanly)
-# TV detection upgraded to also catch: S01 E01, S01-E01, S01_E01, S01.E01 (etc.)
-# AND case-insensitive s/e.
 while IFS= read -r -d '' f; do
   base="$(basename "$f")"
   if [[ "$base" =~ [Ss][0-9]{1,2}[[:space:]_.-]*[Ee][0-9]{1,2} ]]; then
@@ -498,23 +509,18 @@ done < <(find "$RAW_DIR" -type f -name '*.mkv' -print0)
 ingest_mp4_files() {
   while IFS= read -r -d '' FILE; do
     [[ -f "$FILE" ]] || continue
-
     BASENAME="$(basename "$FILE" .mp4)"
 
-    # Featurettes/Extras routing (TV first, then Movies)
     if OUT_F="$(compute_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
       DEST_F="$(dirname "$OUT_F")"
       mkdir -p "$DEST_F"
-
       if [[ -f "$OUT_F" && -s "$OUT_F" ]]; then
         echo "SKIP (exists): $OUT_F"
         echo "SKIP (exists): $OUT_F" >> "$INGEST_LOG"
         continue
       fi
-
       echo "MOVE FEATURETTE MP4 | $FILE -> $OUT_F"
       echo "MOVE FEATURETTE MP4 | $FILE -> $OUT_F" >> "$INGEST_LOG"
-
       TMP="$OUT_F.partial"
       rm -f "$TMP" 2>/dev/null || true
       mv "$FILE" "$TMP"
@@ -525,16 +531,13 @@ ingest_mp4_files() {
     if OUT_M="$(compute_movie_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
       DEST_M="$(dirname "$OUT_M")"
       mkdir -p "$DEST_M"
-
       if [[ -f "$OUT_M" && -s "$OUT_M" ]]; then
         echo "SKIP (exists): $OUT_M"
         echo "SKIP (exists): $OUT_M" >> "$INGEST_LOG"
         continue
       fi
-
       echo "MOVE MOVIE FEATURETTE MP4 | $FILE -> $OUT_M"
       echo "MOVE MOVIE FEATURETTE MP4 | $FILE -> $OUT_M" >> "$INGEST_LOG"
-
       TMP="$OUT_M.partial"
       rm -f "$TMP" 2>/dev/null || true
       mv "$FILE" "$TMP"
@@ -542,7 +545,6 @@ ingest_mp4_files() {
       continue
     fi
 
-    # Normalize common TV patterns (case-insensitive)
     BASENAME_TV="$(echo "$BASENAME" | sed -E 's/[Ss]([0-9]{1,2})[[:space:]_.-]*[Ee]([0-9]{1,2})/S\1E\2/g')"
 
     if [[ "$BASENAME_TV" =~ [Ss]([0-9]{1,2})[Ee]([0-9]{1,2}) ]]; then
@@ -626,11 +628,9 @@ encode_dir() {
     [[ "$WIDTH" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid width '$WIDTH' for $FILE"; exit 1; }
     (( WIDTH >= FOUR_K_MIN_WIDTH )) && TAG="4K" || TAG="1080p"
 
-    # Featurettes/Extras routing (TV first, then Movies)
     if OUT_F="$(compute_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
       DEST_F="$(dirname "$OUT_F")"
       mkdir -p "$DEST_F"
-
       if [[ -f "$OUT_F" && -s "$OUT_F" ]]; then
         echo "SKIP (exists): $OUT_F"
         echo "SKIP (exists): $OUT_F" >> "$INGEST_LOG"
@@ -648,7 +648,6 @@ encode_dir() {
 
       echo "RUNNING | ${CMD[*]}"
       echo "RUNNING | ${CMD[*]}" >> "$INGEST_LOG"
-
       "${CMD[@]}" </dev/null
       mv "$TMP" "$OUT_F"
       continue
@@ -657,7 +656,6 @@ encode_dir() {
     if OUT_M="$(compute_movie_featurette_out "$FILE" "$BASENAME" 2>/dev/null)"; then
       DEST_M="$(dirname "$OUT_M")"
       mkdir -p "$DEST_M"
-
       if [[ -f "$OUT_M" && -s "$OUT_M" ]]; then
         echo "SKIP (exists): $OUT_M"
         echo "SKIP (exists): $OUT_M" >> "$INGEST_LOG"
@@ -675,7 +673,6 @@ encode_dir() {
 
       echo "RUNNING | ${CMD[*]}"
       echo "RUNNING | ${CMD[*]}" >> "$INGEST_LOG"
-
       "${CMD[@]}" </dev/null
       mv "$TMP" "$OUT_M"
       continue
@@ -738,14 +735,12 @@ encode_dir() {
 
     echo "RUNNING | ${CMD[*]}"
     echo "RUNNING | ${CMD[*]}" >> "$INGEST_LOG"
-
     "${CMD[@]}" </dev/null
     mv "$TMP" "$OUT"
   done
   shopt -u nullglob
 }
 
-# Encode each directory containing MKVs exactly once (handles nested unzip layouts too)
 find "$RAW_DIR" -type f -name '*.mkv' -print0 \
   | while IFS= read -r -d '' f; do dirname "$f"; done \
   | sort -u \
@@ -754,6 +749,28 @@ find "$RAW_DIR" -type f -name '*.mkv' -print0 \
       echo "ENCODE DIR: $dir" >> "$INGEST_LOG"
       encode_dir "$dir"
     done
+
+############################################################
+# ============ STEP 3.4: MUSIC PIPELINE (NEW) =============
+############################################################
+
+if [[ "$RUN_MUSIC_PIPELINE" -eq 1 ]]; then
+  if [[ -f "$MUSIC_PIPELINE" ]]; then
+    echo "MUSIC PIPELINE | running: $MUSIC_PIPELINE --source $INPUT_DIR --dest $MUSIC_DIR"
+    echo "MUSIC PIPELINE | running: $MUSIC_PIPELINE --source $INPUT_DIR --dest $MUSIC_DIR" >> "$INGEST_LOG"
+    set +e
+    /usr/bin/python3 "$MUSIC_PIPELINE" --source "$INPUT_DIR" --dest "$MUSIC_DIR"
+    mrc=$?
+    set -e
+    if [[ "$mrc" -ne 0 ]]; then
+      echo "MUSIC PIPELINE | WARNING: exited non-zero ($mrc). Leaving queue in place."
+      echo "MUSIC PIPELINE | WARNING: exited non-zero ($mrc). Leaving queue in place." >> "$INGEST_LOG"
+    fi
+  else
+    echo "MUSIC PIPELINE | not found at $MUSIC_PIPELINE (skipping)"
+    echo "MUSIC PIPELINE | not found at $MUSIC_PIPELINE (skipping)" >> "$INGEST_LOG"
+  fi
+fi
 
 ############################################################
 # ============ STEP 3.5: OPTIONAL AUDIO PIPELINE ===========
