@@ -134,6 +134,9 @@ PY
 }
 
 strip_release_junk() {
+  # IMPORTANT:
+  # Match tokens as stand-alone “words” only. This prevents false matches like:
+  #   "Infinity" containing "NF"  ->  "I"
   echo "$1" | sed -E 's/(^|[^[:alnum:]])(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|HEVC|AV1|DDP[0-9. ]+|AAC[0-9. ]+|EAC3|AC3|TRUEHD|ATMOS|ESub|Eng)([^[:alnum:]]|$).*$//'I
 }
 
@@ -555,7 +558,12 @@ ingest_mp4_files() {
       EPISODE="$(printf "%02d" "$((10#$EPISODE_RAW))")"
 
       SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
-      TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}" | sed 's/[()]+//g')")")"
+
+      # FIX: strip release junk from episode title for "move-only" MP4s
+      RAW_TITLE="${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}"
+      RAW_TITLE="$(echo "$RAW_TITLE" | tr -d '()[]')"
+      RAW_TITLE="$(strip_release_junk "$RAW_TITLE")"
+      TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$RAW_TITLE")")")"
 
       if [[ "$TITLE" =~ ^[Dd][Uu][Aa][Ll]$ ]]; then
         TITLE=""
@@ -688,7 +696,12 @@ encode_dir() {
       EPISODE="$(printf "%02d" "$((10#$EPISODE_RAW))")"
 
       SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
-      TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}" | sed 's/[()]+//g')")")"
+
+      # FIX: strip release junk from episode title for HandBrake output too
+      RAW_TITLE="${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}"
+      RAW_TITLE="$(echo "$RAW_TITLE" | tr -d '()[]')"
+      RAW_TITLE="$(strip_release_junk "$RAW_TITLE")"
+      TITLE="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$RAW_TITLE")")")"
 
       if [[ "$TITLE" =~ ^[Dd][Uu][Aa][Ll]$ ]]; then
         TITLE=""
