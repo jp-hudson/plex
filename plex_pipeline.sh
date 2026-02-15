@@ -140,6 +140,30 @@ strip_release_junk() {
   echo "$1" | sed -E 's/(^|[^[:alnum:]])(2160p|1080p|720p|480p|WEB[- ]DL|WEBRip|BluRay|HDRip|HDTV|AMZN|NF|REPACK|x264|x265|H\.?264|H\.?265|HEVC|AV1|DDP[0-9. ]+|AAC[0-9. ]+|EAC3|AC3|TRUEHD|ATMOS|ESub|Eng)([^[:alnum:]]|$).*$//'I
 }
 
+# PATCH: If a TV filename starts with S01E01... (no leading series),
+# derive series title from the *unzip folder name* (first dir under handbrake_raw).
+fallback_series_from_unzip_dir() {
+  local file="$1"
+  local show_base series_part series rel
+
+  if [[ "$file" == "$RAW_DIR/"* ]]; then
+    rel="${file#"$RAW_DIR/"}"
+    show_base="${rel%%/*}"
+  else
+    show_base="$(basename "$(dirname "$file")")"
+  fi
+
+  # Drop obvious year markers like (2024) or [2024]
+  series_part="$(echo "$show_base" | sed -E 's/\([[:space:]]*(19|20)[0-9]{2}[[:space:]]*\)//g; s/\[[[:space:]]*(19|20)[0-9]{2}[[:space:]]*\]//g')"
+
+  # Remove anything starting at "Season N" or "SNN..." (covers "S01 E01-06", "S01", etc.)
+  series_part="$(echo "$series_part" | sed -E 's/[[:space:]]+[Ss]eason[[:space:]]*[0-9]{1,2}.*$//I; s/[[:space:]]+[Ss][0-9]{1,2}.*$//I')"
+
+  series_part="$(strip_release_junk "$series_part")"
+  series="$(maybe_title_case "$(trim_dashes "$(sanitize_name "$series_part")")")"
+  echo "$series"
+}
+
 move_dir_unique() {
   local src="$1"
   local dst="$2"
@@ -459,7 +483,7 @@ for ZIP in "$RAW_DIR"/*.zip; do
   extract_zip "$ZIP" "$DEST_DIR"
   rc="$EXTRACT_LAST_RC"
 
-  # NEW: flatten wrapper folder to avoid Hyperlove/Hyperlove
+  # Flatten wrapper folder to avoid Hyperlove/Hyperlove
   flatten_single_wrapper_dir "$DEST_DIR"
 
   if [[ -d "$DEST_DIR" ]] && has_audio "$DEST_DIR" && ! has_video "$DEST_DIR"; then
@@ -558,6 +582,12 @@ ingest_mp4_files() {
       EPISODE="$(printf "%02d" "$((10#$EPISODE_RAW))")"
 
       SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
+
+      # PATCH: handle packs where filenames start with S01E01... (no leading series)
+      if [[ -z "${SERIES//[[:space:]]/}" ]]; then
+        SERIES="$(fallback_series_from_unzip_dir "$FILE")"
+      fi
+      [[ -n "${SERIES//[[:space:]]/}" ]] || SERIES="Unknown Series"
 
       # FIX: strip release junk from episode title for "move-only" MP4s
       RAW_TITLE="${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}"
@@ -696,6 +726,12 @@ encode_dir() {
       EPISODE="$(printf "%02d" "$((10#$EPISODE_RAW))")"
 
       SERIES="$(maybe_title_case "$(trim_dashes "$(sanitize_name "${BASENAME_TV%%S${SEASON_RAW}E${EPISODE_RAW}*}")")")"
+
+      # PATCH: handle packs where filenames start with S01E01... (no leading series)
+      if [[ -z "${SERIES//[[:space:]]/}" ]]; then
+        SERIES="$(fallback_series_from_unzip_dir "$FILE")"
+      fi
+      [[ -n "${SERIES//[[:space:]]/}" ]] || SERIES="Unknown Series"
 
       # FIX: strip release junk from episode title for HandBrake output too
       RAW_TITLE="${BASENAME_TV#*S${SEASON_RAW}E${EPISODE_RAW}}"
