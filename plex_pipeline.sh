@@ -4,6 +4,9 @@ set -euo pipefail
 # Ensure Automator/Shortcuts can find Homebrew tools (7z, gawk, etc.)
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# PATCH (set -u safe): always define this array so it's never "unbound"
+declare -a HB_SUBTITLE_ARGS=()
+
 ############################################################
 # ======================= CONFIG ===========================
 ############################################################
@@ -68,6 +71,12 @@ done
 RAW_DIR="$INPUT_DIR/$RAW_DIR_NAME"
 
 mkdir -p "$AUDIO_QUEUE" "$AUDIO_INCOMING_FILES" "$AUDIO_SOURCE_ZIPS" "$AUDIO_FAILED_ZIPS"
+
+# PATCH (set -u safe): initialize subtitle args (best-effort, no behavior change if unsupported)
+HB_SUBTITLE_ARGS=()
+if HandBrakeCLI --help 2>&1 | grep -q -- '--all-subtitles'; then
+  HB_SUBTITLE_ARGS=( --all-subtitles )
+fi
 
 ############################################################
 # ====================== HELPERS ===========================
@@ -679,9 +688,9 @@ encode_dir() {
       rm -f "$TMP" 2>/dev/null || true
 
       if [[ "$TAG" == "4K" ]]; then
-        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 )
+        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 ${HB_SUBTITLE_ARGS[@]+"${HB_SUBTITLE_ARGS[@]}"} )
       else
-        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize )
+        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize ${HB_SUBTITLE_ARGS[@]+"${HB_SUBTITLE_ARGS[@]}"} )
       fi
 
       echo "RUNNING | ${CMD[*]}"
@@ -704,9 +713,9 @@ encode_dir() {
       rm -f "$TMP" 2>/dev/null || true
 
       if [[ "$TAG" == "4K" ]]; then
-        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 )
+        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 ${HB_SUBTITLE_ARGS[@]+"${HB_SUBTITLE_ARGS[@]}"} )
       else
-        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize )
+        CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize ${HB_SUBTITLE_ARGS[@]+"${HB_SUBTITLE_ARGS[@]}"} )
       fi
 
       echo "RUNNING | ${CMD[*]}"
@@ -777,9 +786,9 @@ encode_dir() {
     rm -f "$TMP" 2>/dev/null || true
 
     if [[ "$TAG" == "4K" ]]; then
-      CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 )
+      CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="HQ 2160p60 4K HEVC Surround" -q 20 ${HB_SUBTITLE_ARGS[@]+"${HB_SUBTITLE_ARGS[@]}"} )
     else
-      CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize )
+      CMD=( HandBrakeCLI -i "$FILE" -o "$TMP" --preset="$PRESET_1080P" --format av_mp4 --optimize ${HB_SUBTITLE_ARGS[@]+"${HB_SUBTITLE_ARGS[@]}"} )
     fi
 
     echo "RUNNING | ${CMD[*]}"
